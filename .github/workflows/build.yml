@@ -27,6 +27,8 @@ jobs:
           git clone --depth 1 https://github.com/theos/sdks.git sdks-tmp
           mv sdks-tmp/*.sdk "$THEOS/sdks/"
           rm -rf sdks-tmp
+          ls "$THEOS/sdks"
+          ls -d "$THEOS"/sdks/*/System/Library/PrivateFrameworks/Preferences.framework || true
 
       - name: Build package
         run: |
