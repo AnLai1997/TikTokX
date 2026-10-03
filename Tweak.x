@@ -185,6 +185,15 @@ static void TTXHookBackgroundClass(NSString *className) {
 - (BOOL)isCurrentSceneEnable:(long)scene {
 	return ttxBackgroundAudio ? YES : %orig;
 }
+
+// Tu cuon sang video tiep theo khi dang phat nen (ca luc khoa man hinh)
+- (BOOL)isAutoPlayEnabled {
+	return ttxAutoNext ? YES : %orig;
+}
+
+- (void)setIsAutoPlayEnabled:(BOOL)enabled {
+	%orig(ttxAutoNext ? YES : enabled);
+}
 %end
 
 %hook UIApplication
@@ -338,6 +347,35 @@ static void TTXScrollNextGeneric(id player) {
 	});
 }
 
+// Scroll view doc cao nhat dang hien (feed), khong can pagingEnabled
+static UIScrollView *TTXFindFeedScrollView(UIView *view) {
+	UIScrollView *best = nil;
+	NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:view ?: [UIView new]];
+	while (queue.count) {
+		UIView *v = queue.firstObject;
+		[queue removeObjectAtIndex:0];
+		if (v.hidden) continue;
+		if ([v isKindOfClass:[UIScrollView class]] && v.bounds.size.height > best.bounds.size.height
+			&& ((UIScrollView *)v).contentSize.height > v.bounds.size.height) best = (UIScrollView *)v;
+		[queue addObjectsFromArray:v.subviews];
+	}
+	return best;
+}
+
+// Chay tren main thread khi video lap lai luc app o nen
+static void TTXScrollNextIfStuck(id player) {
+	UIViewController *top = ttxVisibleFeed ?: TTXTopViewController();
+	UIScrollView *sv = TTXFindFeedScrollView(top.view);
+	CGFloat offset = sv.contentOffset.y;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		if (sv && fabs(sv.contentOffset.y - offset) > 1) {
+			ttxLastScrollInfo = @"TikTok tu cuon (nen)";
+			return;
+		}
+		if (!TTXTryScrollNext(player)) TTXScrollNextGeneric(player);
+	});
+}
+
 static void TTXHookLoop(NSString *className) {
 	Class cls = NSClassFromString(className);
 	SEL sel = @selector(playerWillLoopPlaying:);
@@ -347,6 +385,14 @@ static void TTXHookLoop(NSString *className) {
 	__block void (*orig)(id, SEL, id) = NULL;
 	IMP repl = imp_implementationWithBlock(^(id obj, id arg) {
 		TTXCount(ttxLoopCalls, obj);
+		// O nen TikTok co the tu cuon (isAutoPlayEnabled): de no lam truoc, chi cuon neu feed dung yen
+		if (ttxAutoNext && !ttxAppActive) {
+			orig(obj, sel, arg);
+			dispatch_async(dispatch_get_main_queue(), ^{
+				TTXScrollNextIfStuck(obj);
+			});
+			return;
+		}
 		if (ttxAutoNext && TTXTryScrollNext(obj)) return;
 		orig(obj, sel, arg);
 		// Khong phai feed trang chu: de video lap lai, roi thu cuon feed dang chua player
@@ -378,6 +424,8 @@ static void TTXHookLoop(NSString *className) {
 // Getter BOOL co chu "background": ten mang nghia cam (pause/stop/disable...) -> NO,
 // mang nghia cho phep (play/support/enable/allow/can) -> YES. Chi khi bat nhac nen.
 static NSMutableArray<NSString *> *ttxBgSwitches;
+// Class co ten lien quan den tu cuon (nut "Tu dong cuon" trong menu nhan giu)
+static NSMutableArray<NSString *> *ttxAutoScrollClasses;
 
 static void TTXForceBackgroundGetters(Class cls) {
 	unsigned int count = 0;
@@ -435,6 +483,9 @@ static void TTXScanBackgroundClasses(void) {
 				|| [name containsString:@"BackgroundAudio"] || [name containsString:@"BGPlay"]) {
 				[names addObject:name];
 				matched++;
+			} else if (ttxAutoScrollClasses.count < 12 && ([name containsString:@"AutoScroll"] || [name containsString:@"AutoPlayNext"]
+				|| [name containsString:@"AutoSlide"] || [name containsString:@"AutoNext"])) {
+				[ttxAutoScrollClasses addObject:name];
 			}
 		}
 		free(classNames);
@@ -581,7 +632,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.11 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.12 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -597,6 +648,8 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
 	[lines addObject:@"--- Method class phat nen ---"];
 	for (NSString *name in TTXAudioComponentClasses()) [lines addObject:TTXFullMethodDump(name)];
+	[lines addObject:@"--- Class tu cuon ---"];
+	for (NSString *name in ttxAutoScrollClasses) [lines addObject:TTXFullMethodDump(name)];
 	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
 	[lines addObject:@"--- Method ---"];
@@ -678,10 +731,12 @@ static void TTXShowDiagnostics(void) {
 	TTXForceBool(@"AWENewFeedTableViewController", @"shouldIgnoreDisappearPause", YES);
 
 	ttxBgSwitches = [NSMutableArray array];
+	ttxAutoScrollClasses = [NSMutableArray array];
 	TTXScanBackgroundClasses();
 
 	ttxTraceCalls = [NSCountedSet set];
 	for (NSString *name in TTXAudioComponentClasses()) TTXTraceClass(name);
+	for (NSString *name in ttxAutoScrollClasses) TTXTraceClass(name);
 
 	%init;
 }
