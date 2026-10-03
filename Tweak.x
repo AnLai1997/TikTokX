@@ -470,6 +470,8 @@ static void TTXForceBackgroundGetters(Class cls) {
 // Class cua cac nut trong menu nhan giu (tu cuon, xoa man hinh). Moi nut la mot
 // AWEShareBaseChannel nhu TTKBackgroundAudioChannel.
 static BOOL TTXIsFeatureClass(NSString *name) {
+	// Bo qua class cua Live
+	if ([name hasPrefix:@"IESLive"] || [name hasPrefix:@"IESMT"] || [name hasPrefix:@"GBL"]) return NO;
 	for (NSString *kw in @[@"AutoScroll", @"AutoPlayNext", @"AutoSlide", @"AutoNext",
 		@"ClearScreen", @"ClearMode", @"CleanMode", @"ClearDisplay", @"CleanScreen", @"PureMode"]) {
 		if ([name containsString:kw]) return YES;
@@ -621,56 +623,17 @@ static void TTXPlayInBackground(void) {
 
 #pragma mark - Diagnostics
 
-// Liet ke method lien quan cua cac class dang nghi ngo
-static NSString *TTXMethodDump(NSString *className) {
-	Class cls = NSClassFromString(className);
-	if (!cls) return [NSString stringWithFormat:@"%@: (khong co class)", className];
-	NSArray *keywords = @[@"pause", @"Pause", @"loop", @"Loop", @"Background", @"background", @"ResignActive", @"resignActive", @"finish", @"Finish", @"NextVideo"];
-	NSMutableArray *found = [NSMutableArray array];
-	unsigned int count = 0;
-	Method *methods = class_copyMethodList(cls, &count);
-	for (unsigned int i = 0; i < count && found.count < 25; i++) {
-		NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-		for (NSString *kw in keywords) {
-			if ([sel containsString:kw]) {
-				[found addObject:sel];
-				break;
-			}
-		}
-	}
-	free(methods);
-	return [NSString stringWithFormat:@"%@ (%@): %@", className, NSStringFromClass(class_getSuperclass(cls)), [found componentsJoinedByString:@" "]];
-}
-
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.13 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.14 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
-	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
-	[lines addObject:[NSString stringWithFormat:@"AudioSession: %@", [AVAudioSession sharedInstance].category]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
-	[lines addObject:[NSString stringWithFormat:@"Goi khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
-	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
-	[lines addObject:@"--- Hook da cai ---"];
-	[lines addObject:[NSString stringWithFormat:@"playInBackground da goi: %@", ttxPlayInBackgroundInfo]];
-	[lines addObject:@"--- Cong tac phat nen ---"];
-	[lines addObjectsFromArray:ttxBgSwitches];
-	[lines addObject:@"--- Goi tren class phat nen ---"];
+	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
-	[lines addObject:@"--- Method class phat nen ---"];
-	for (NSString *name in TTXAudioComponentClasses()) [lines addObject:TTXFullMethodDump(name)];
 	[lines addObject:@"--- Class tu cuon / xoa man hinh ---"];
 	for (NSString *name in ttxAutoScrollClasses) [lines addObject:TTXFullMethodDump(name)];
-	[lines addObjectsFromArray:ttxBoolHooks];
-	[lines addObjectsFromArray:ttxInstalled];
-	[lines addObject:@"--- Method ---"];
-	NSMutableOrderedSet *classes = [NSMutableOrderedSet orderedSetWithArray:TTXPauseClasses()];
-	[classes addObjectsFromArray:TTXLoopClasses()];
-	for (NSString *name in classes) {
-		[lines addObject:TTXMethodDump(name)];
-	}
 	return [lines componentsJoinedByString:@"\n"];
 }
 
