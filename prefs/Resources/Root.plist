@@ -42,6 +42,28 @@
 			<key>PostNotification</key>
 			<string>com.anlai.tiktokx/prefsChanged</string>
 		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Chan doan</string>
+			<key>footerText</key>
+			<string>Hien bao cao khi mo TikTok, bam Copy de gui cho dev. Tat khi khong can nua.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Hien bao cao chan doan</string>
+			<key>defaults</key>
+			<string>com.anlai.tiktokx</string>
+			<key>key</key>
+			<string>diagnostics</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.anlai.tiktokx/prefsChanged</string>
+		</dict>
 	</array>
 </dict>
 </plist>
