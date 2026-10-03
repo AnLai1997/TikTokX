@@ -1,9 +1,9 @@
-TARGET := iphone:clang:16.5:14.0
+TARGET := iphone:clang:16.5:15.0
 ARCHS = arm64 arm64e
 INSTALL_TARGET_PROCESSES = TikTok
 
-# Bo comment dong duoi neu build cho jailbreak rootless (Dopamine, palera1n rootless...)
-# THEOS_PACKAGE_SCHEME = rootless
+# Chi build cho Dopamine (rootless)
+THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
