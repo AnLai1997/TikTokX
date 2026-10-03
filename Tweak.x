@@ -103,7 +103,9 @@ static BOOL TTXHookBackgroundMethod(Class cls, Method method) {
 	method_getReturnType(method, ret, sizeof(ret));
 	if (ret[0] != 'v') return NO;
 
-	BOOL blockable = [name.lowercaseString hasPrefix:@"pause"];
+	// Chan ca handler "vao nen" (feed trang chu tu dung video o day)
+	NSString *lower = name.lowercaseString;
+	BOOL blockable = [lower hasPrefix:@"pause"] || [lower containsString:@"resignactive"] || [lower containsString:@"enterbackground"];
 	unsigned int nargs = method_getNumberOfArguments(method);
 	if (nargs == 2) {
 		__block void (*orig)(id, SEL) = NULL;
@@ -337,7 +339,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.5 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.6 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
