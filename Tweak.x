@@ -74,7 +74,7 @@ static void TTXConfigureAudioSession(void) {
 // lan class con khong bi de quy.
 static BOOL TTXIsTraceSelector(NSString *name) {
 	NSString *lower = name.lowercaseString;
-	for (NSString *kw in @[@"pause", @"stop", @"play", @"background", @"resignactive", @"interrupt"]) {
+	for (NSString *kw in @[@"pause", @"stop", @"play", @"background", @"resignactive", @"interrupt", @"mute", @"volume", @"close"]) {
 		if ([lower containsString:kw]) return YES;
 	}
 	return NO;
@@ -164,6 +164,28 @@ static void TTXHookBackgroundClass(NSString *className) {
 }
 %end
 
+// TikTok co san co che phat nen (playInBackground, shouldIgnoreDisappearPause) nhung bi tat.
+// Ep getter BOOL tra ve YES; onlyInBackground = chi khi app dang o nen.
+static NSMutableArray<NSString *> *ttxBoolHooks;
+
+static void TTXForceBool(NSString *className, NSString *selName, BOOL onlyInBackground) {
+	Class cls = NSClassFromString(className);
+	SEL sel = NSSelectorFromString(selName);
+	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+	if (!method) return;
+	char ret[8] = {0};
+	method_getReturnType(method, ret, sizeof(ret));
+	[ttxBoolHooks addObject:[NSString stringWithFormat:@"%@ -%@ (%s)", className, selName, ret]];
+	if (method_getNumberOfArguments(method) != 2 || !(ret[0] == 'B' || ret[0] == 'c')) return;
+
+	__block BOOL (*orig)(id, SEL) = NULL;
+	IMP repl = imp_implementationWithBlock(^BOOL(id obj) {
+		if (ttxBackgroundAudio && (!onlyInBackground || !ttxAppActive)) return YES;
+		return orig(obj, sel);
+	});
+	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+}
+
 #pragma mark - Auto next
 
 static __weak UIViewController *ttxVisibleFeed;
@@ -194,6 +216,13 @@ static BOOL TTXTryScrollNext(id player) {
 	ttxLastScroll = now;
 	ttxAutoNextHits++;
 	dispatch_async(dispatch_get_main_queue(), ^{
+		// O nen TikTok co ham cuon rieng
+		SEL bgSel = NSSelectorFromString(@"scrollToNextBackgroundVideo");
+		if (!ttxAppActive && [feed respondsToSelector:bgSel]) {
+			((void (*)(id, SEL))objc_msgSend)(feed, bgSel);
+			ttxLastScrollInfo = [NSString stringWithFormat:@"%@ (nen)", NSStringFromClass([feed class])];
+			return;
+		}
 		[(AWENewFeedTableViewController *)feed scrollToNextVideo];
 		ttxLastScrollInfo = NSStringFromClass([feed class]);
 	});
@@ -339,7 +368,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.6 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.7 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -348,6 +377,7 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:[NSString stringWithFormat:@"Goi khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
 	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
 	[lines addObject:@"--- Hook da cai ---"];
+	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
 	[lines addObject:@"--- Method ---"];
 	NSMutableOrderedSet *classes = [NSMutableOrderedSet orderedSetWithArray:TTXPauseClasses()];
@@ -417,6 +447,11 @@ static void TTXShowDiagnostics(void) {
 
 	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
+
+	ttxBoolHooks = [NSMutableArray array];
+	TTXForceBool(@"AWENewFeedTableViewController", @"playInBackground", NO);
+	TTXForceBool(@"TTKMediaVideoPlayerController", @"playInBackground", NO);
+	TTXForceBool(@"AWENewFeedTableViewController", @"shouldIgnoreDisappearPause", YES);
 
 	%init;
 }
