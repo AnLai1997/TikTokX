@@ -14,7 +14,8 @@ static NSArray<NSString *> *TTXPauseClasses(void) {
 		@"TTKMediaPlayerController", @"AWEVideoPlayerController", @"AWEAVPlayerWrapper_TTVideoEngine"];
 }
 static NSArray<NSString *> *TTXLoopClasses(void) {
-	return @[@"TTKMediaVideoPlayerController", @"AWEVideoPlayerController", @"TTKMediaPlayerController", @"AWEPlayVideoPlayerController"];
+	return @[@"TTKMediaVideoPlayerController", @"AWEVideoPlayerController", @"TTKMediaPlayerController", @"AWEPlayVideoPlayerController",
+		@"TTKCommerceSearchVideoPlayerController"];
 }
 
 // Dem hook nao duoc goi, dung cho bao cao chan doan
@@ -165,6 +166,7 @@ static void TTXHookBackgroundClass(NSString *className) {
 
 static __weak UIViewController *ttxVisibleFeed;
 static CFAbsoluteTime ttxLastScroll;
+static NSString *ttxLastScrollInfo = @"-";
 
 static UIView *TTXPlayerView(id player) {
 	for (NSString *name in @[@"view", @"playerView", @"containerView"]) {
@@ -191,8 +193,88 @@ static BOOL TTXTryScrollNext(id player) {
 	ttxAutoNextHits++;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		[(AWENewFeedTableViewController *)feed scrollToNextVideo];
+		ttxLastScrollInfo = NSStringFromClass([feed class]);
 	});
 	return YES;
+}
+
+// Feed dang video full man hinh (vd. ket qua tim kiem): scroll view cuon tung trang, cao gan bang man hinh
+static BOOL TTXIsPagedFeed(UIScrollView *sv) {
+	UIWindow *window = sv.window;
+	if (!window || sv.hidden || !sv.pagingEnabled) return NO;
+	CGFloat h = sv.bounds.size.height;
+	return h >= window.bounds.size.height * 0.8 && sv.contentSize.height > h + 1;
+}
+
+static UIScrollView *TTXFindPagedFeed(UIView *view) {
+	if ([view isKindOfClass:[UIScrollView class]] && TTXIsPagedFeed((UIScrollView *)view)) return (UIScrollView *)view;
+	for (UIView *sub in view.subviews.reverseObjectEnumerator) {
+		if (sub.hidden || sub.alpha < 0.01) continue;
+		UIScrollView *found = TTXFindPagedFeed(sub);
+		if (found) return found;
+	}
+	return nil;
+}
+
+static UIViewController *TTXTopViewController(void) {
+	UIWindow *window = nil;
+	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+			if (w.isKeyWindow) window = w;
+		}
+	}
+	UIViewController *top = window.rootViewController;
+	while (top.presentedViewController) top = top.presentedViewController;
+	return top;
+}
+
+// Cuon sang video tiep theo o feed khac trang chu. Chay tren main thread.
+static void TTXScrollNextGeneric(id player) {
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (now - ttxLastScroll < 1.0) return;
+
+	UIView *playerView = TTXPlayerView(player);
+	if (playerView && !playerView.window) return; // player an / dang preload
+	// Dang mo man hinh khac de len (binh luan, chia se...) thi khong cuon
+	UIViewController *top = TTXTopViewController();
+	if (playerView && ![playerView isDescendantOfView:top.view]) return;
+
+	// 1. Controller chua player co san scrollToNextVideo
+	for (UIResponder *r = playerView; r; r = r.nextResponder) {
+		if (![r isKindOfClass:[UIViewController class]]) continue;
+		UIViewController *vc = (UIViewController *)r;
+		if ([vc respondsToSelector:@selector(scrollToNextVideo)]) {
+			if (vc.presentedViewController) return;
+			ttxLastScroll = now;
+			ttxAutoNextHits++;
+			ttxLastScrollInfo = NSStringFromClass([vc class]);
+			[(AWENewFeedTableViewController *)vc scrollToNextVideo];
+			return;
+		}
+	}
+
+	// 2. Scroll view cuon tung trang chua player (hoac tren man hinh dang hien neu khong lay duoc view)
+	UIScrollView *sv = nil;
+	for (UIView *v = playerView.superview; v && !sv; v = v.superview) {
+		if ([v isKindOfClass:[UIScrollView class]] && TTXIsPagedFeed((UIScrollView *)v)) sv = (UIScrollView *)v;
+	}
+	if (!sv && !playerView) sv = TTXFindPagedFeed(top.view);
+	if (!sv) return;
+
+	CGFloat h = sv.bounds.size.height;
+	CGFloat next = (round(sv.contentOffset.y / h) + 1) * h;
+	if (next + h > sv.contentSize.height + sv.contentInset.bottom + 1) return; // het video
+	ttxLastScroll = now;
+	ttxAutoNextHits++;
+	ttxLastScrollInfo = [NSString stringWithFormat:@"%@ (scroll view)", NSStringFromClass([sv class])];
+	[sv setContentOffset:CGPointMake(sv.contentOffset.x, next) animated:YES];
+	// Mot so feed chi phat video moi khi nguoi dung tu vuot xong
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		if ([sv.delegate respondsToSelector:@selector(scrollViewDidEndDecelerating:)]) {
+			[sv.delegate scrollViewDidEndDecelerating:sv];
+		}
+	});
 }
 
 static void TTXHookLoop(NSString *className) {
@@ -206,6 +288,12 @@ static void TTXHookLoop(NSString *className) {
 		TTXCount(ttxLoopCalls, obj);
 		if (ttxAutoNext && TTXTryScrollNext(obj)) return;
 		orig(obj, sel, arg);
+		// Khong phai feed trang chu: de video lap lai, roi thu cuon feed dang chua player
+		if (ttxAutoNext) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				TTXScrollNextGeneric(obj);
+			});
+		}
 	});
 	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
 	[ttxInstalled addObject:[NSString stringWithFormat:@"%@ -playerWillLoopPlaying:", className]];
@@ -249,12 +337,12 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.4 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.5 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
 	[lines addObject:[NSString stringWithFormat:@"AudioSession: %@", [AVAudioSession sharedInstance].category]];
-	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits]];
+	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Goi khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
 	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
 	[lines addObject:@"--- Hook da cai ---"];
