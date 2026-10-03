@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>TikTokX</string>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Phat lai</string>
+			<key>footerText</key>
+			<string>Thay doi co hieu luc ngay, khong can khoi dong lai TikTok.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Luon chay nhac nen</string>
+			<key>defaults</key>
+			<string>com.anlai.tiktokx</string>
+			<key>key</key>
+			<string>backgroundAudio</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.anlai.tiktokx/prefsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Luon cuon video tiep theo</string>
+			<key>defaults</key>
+			<string>com.anlai.tiktokx</string>
+			<key>key</key>
+			<string>autoNext</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.anlai.tiktokx/prefsChanged</string>
+		</dict>
+	</array>
+</dict>
+</plist>

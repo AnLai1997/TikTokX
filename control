@@ -1,0 +1,9 @@
+Package: com.anlai.tiktokx
+Name: TikTokX
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Bat/tat phat nhac nen va tu dong cuon video tiep theo cho TikTok
+Maintainer: AnLai
+Author: AnLai
+Section: Tweaks
+Depends: mobilesubstrate, preferenceloader
