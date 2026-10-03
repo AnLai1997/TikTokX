@@ -80,9 +80,16 @@ static BOOL TTXIsTraceSelector(NSString *name) {
 	return NO;
 }
 
+// Player cua video dang hien tren man hinh (de goi playInBackground khi vao nen)
+static __weak id ttxCurrentPlayer;
+static SEL ttxDisplaySel;
+
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
-	if (ttxAppActive) return NO;
+	if (ttxAppActive) {
+		if (sel == ttxDisplaySel) ttxCurrentPlayer = obj;
+		return NO;
+	}
 	NSString *key = [NSString stringWithFormat:@"%@ -%@", NSStringFromClass(object_getClass(obj)), NSStringFromSelector(sel)];
 	@synchronized (ttxPauseCalls) {
 		[ttxPauseCalls addObject:key];
@@ -342,6 +349,24 @@ static void TTXHookLoop(NSString *className) {
 }
 %end
 
+#pragma mark - Play in background
+
+// Trang chu khong tu goi playInBackground khi vao nen nen trinh phat dung o tang duoi
+// (khong qua pause). Goi thay TikTok tren feed va player dang hien.
+static NSString *ttxPlayInBackgroundInfo = @"chua goi";
+
+static void TTXPlayInBackground(void) {
+	if (!ttxBackgroundAudio) return;
+	SEL sel = NSSelectorFromString(@"playInBackground");
+	NSMutableArray *called = [NSMutableArray array];
+	for (id target in @[ttxVisibleFeed ?: [NSNull null], ttxCurrentPlayer ?: [NSNull null]]) {
+		if (target == [NSNull null] || ![target respondsToSelector:sel]) continue;
+		((void (*)(id, SEL))objc_msgSend)(target, sel);
+		[called addObject:NSStringFromClass(object_getClass(target))];
+	}
+	ttxPlayInBackgroundInfo = called.count ? [called componentsJoinedByString:@", "] : @"khong co doi tuong";
+}
+
 #pragma mark - Diagnostics
 
 // Liet ke method lien quan cua cac class dang nghi ngo
@@ -368,7 +393,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.7 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.8 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -377,6 +402,7 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:[NSString stringWithFormat:@"Goi khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
 	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
 	[lines addObject:@"--- Hook da cai ---"];
+	[lines addObject:[NSString stringWithFormat:@"playInBackground da goi: %@", ttxPlayInBackgroundInfo]];
 	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
 	[lines addObject:@"--- Method ---"];
@@ -428,6 +454,9 @@ static void TTXShowDiagnostics(void) {
 		ttxAppActive = NO;
 		TTXConfigureAudioSession();
 	}];
+	[nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+		TTXPlayInBackground();
+	}];
 	[nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		ttxAppActive = YES;
 	}];
@@ -448,6 +477,7 @@ static void TTXShowDiagnostics(void) {
 	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
 
+	ttxDisplaySel = NSSelectorFromString(@"containerDidFullyDisplayWithReason:");
 	ttxBoolHooks = [NSMutableArray array];
 	TTXForceBool(@"AWENewFeedTableViewController", @"playInBackground", NO);
 	TTXForceBool(@"TTKMediaVideoPlayerController", @"playInBackground", NO);
