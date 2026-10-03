@@ -426,6 +426,95 @@ static void TTXScanBackgroundClasses(void) {
 	}
 }
 
+#pragma mark - Background audio components
+
+// Co che phat nen chinh thuc cua TikTok: trang chu dung TTKFeedBackgroundAudioComponent,
+// man chi tiet (tim kiem, phat nen duoc) dung TTKFeedDetailBackgroundAudioComponent.
+// Theo doi moi method (o ca foreground) de so sanh hai ben.
+static NSArray<NSString *> *TTXAudioComponentClasses(void) {
+	return @[@"TTKFeedBackgroundAudioComponent", @"TTKFeedDetailBackgroundAudioComponent", @"TTKFeedBackgroundAudioTask",
+		@"AWEBackgroundAudioSettingsManager", @"TTKBackgroundAudioChannel", @"GBLBackgroundPlaybackModeModel"];
+}
+
+static NSCountedSet *ttxTraceCalls;
+
+static void TTXTrace(NSString *key) {
+	@synchronized (ttxTraceCalls) {
+		[ttxTraceCalls addObject:key];
+	}
+}
+
+static void TTXTraceClass(NSString *className) {
+	Class cls = NSClassFromString(className);
+	if (!cls) return;
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+	for (unsigned int i = 0; i < count; i++) {
+		Method method = methods[i];
+		SEL sel = method_getName(method);
+		NSString *name = NSStringFromSelector(sel);
+		if ([name hasPrefix:@"."] || [name isEqualToString:@"dealloc"]) continue;
+		char ret[8] = {0}, arg[8] = {0};
+		method_getReturnType(method, ret, sizeof(ret));
+		unsigned int nargs = method_getNumberOfArguments(method);
+		if (nargs == 3) method_getArgumentType(method, 2, arg, sizeof(arg));
+		NSString *key = [NSString stringWithFormat:@"%@ -%@", className, name];
+
+		if ((ret[0] == 'B' || ret[0] == 'c') && nargs == 2) {
+			__block BOOL (*orig)(id, SEL) = NULL;
+			IMP repl = imp_implementationWithBlock(^BOOL(id obj) {
+				BOOL result = orig(obj, sel);
+				TTXTrace([NSString stringWithFormat:@"%@=%d", key, result]);
+				return result;
+			});
+			MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		} else if (ret[0] == 'v' && nargs == 2) {
+			__block void (*orig)(id, SEL) = NULL;
+			IMP repl = imp_implementationWithBlock(^(id obj) {
+				TTXTrace(key);
+				orig(obj, sel);
+			});
+			MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		} else if (ret[0] == 'v' && nargs == 3 && arg[0] == '@') {
+			__block void (*orig)(id, SEL, id) = NULL;
+			IMP repl = imp_implementationWithBlock(^(id obj, id a) {
+				TTXTrace(key);
+				orig(obj, sel, a);
+			});
+			MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		} else if (ret[0] == 'v' && nargs == 3 && arg[0] && strchr("BcCsSiIlLqQ", arg[0])) {
+			__block void (*orig)(id, SEL, long) = NULL;
+			IMP repl = imp_implementationWithBlock(^(id obj, long a) {
+				TTXTrace([NSString stringWithFormat:@"%@(%ld)", key, a & 0xff]);
+				orig(obj, sel, a);
+			});
+			MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		}
+	}
+	free(methods);
+}
+
+// Liet ke day du method (instance va class) kem kieu tra ve
+static NSString *TTXFullMethodDump(NSString *className) {
+	Class cls = NSClassFromString(className);
+	if (!cls) return [NSString stringWithFormat:@"%@: (khong co class)", className];
+	NSMutableArray *parts = [NSMutableArray array];
+	for (int meta = 0; meta < 2; meta++) {
+		Class target = meta ? object_getClass(cls) : cls;
+		unsigned int count = 0;
+		Method *methods = class_copyMethodList(target, &count);
+		for (unsigned int i = 0; i < count && parts.count < 80; i++) {
+			NSString *name = NSStringFromSelector(method_getName(methods[i]));
+			if ([name hasPrefix:@"."]) continue;
+			char ret[8] = {0};
+			method_getReturnType(methods[i], ret, sizeof(ret));
+			[parts addObject:[NSString stringWithFormat:@"%@%@(%c)", meta ? @"+" : @"", name, ret[0]]];
+		}
+		free(methods);
+	}
+	return [NSString stringWithFormat:@"%@ (%@): %@", className, NSStringFromClass(class_getSuperclass(cls)), [parts componentsJoinedByString:@" "]];
+}
+
 #pragma mark - Play in background
 
 // Trang chu khong tu goi playInBackground khi vao nen nen trinh phat dung o tang duoi
@@ -470,7 +559,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.9 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.10 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -482,6 +571,10 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:[NSString stringWithFormat:@"playInBackground da goi: %@", ttxPlayInBackgroundInfo]];
 	[lines addObject:@"--- Cong tac phat nen ---"];
 	[lines addObjectsFromArray:ttxBgSwitches];
+	[lines addObject:@"--- Goi tren class phat nen ---"];
+	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
+	[lines addObject:@"--- Method class phat nen ---"];
+	for (NSString *name in TTXAudioComponentClasses()) [lines addObject:TTXFullMethodDump(name)];
 	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
 	[lines addObject:@"--- Method ---"];
@@ -564,6 +657,9 @@ static void TTXShowDiagnostics(void) {
 
 	ttxBgSwitches = [NSMutableArray array];
 	TTXScanBackgroundClasses();
+
+	ttxTraceCalls = [NSCountedSet set];
+	for (NSString *name in TTXAudioComponentClasses()) TTXTraceClass(name);
 
 	%init;
 }
