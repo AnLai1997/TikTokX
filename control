@@ -1,6 +1,6 @@
 Package: com.anlai.tiktokx
 Name: TikTokX
-Version: 1.0.0
+Version: 1.0.1
 Architecture: iphoneos-arm64
 Description: Bat/tat phat nhac nen va tu dong cuon video tiep theo cho TikTok
 Maintainer: AnLai
