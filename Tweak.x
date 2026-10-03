@@ -67,28 +67,99 @@ static void TTXConfigureAudioSession(void) {
 	[session setActive:YES error:nil];
 }
 
-// Hook -pause cua tung class bang block rieng (moi block giu IMP goc cua class do,
-// tranh de quy khi ca class cha va class con deu bi hook)
-static void TTXHookPause(NSString *className) {
-	Class cls = NSClassFromString(className);
-	SEL sel = @selector(pause);
-	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
-	if (!method || method_getNumberOfArguments(method) != 2) return;
-
-	__block void (*orig)(id, SEL) = NULL;
-	IMP repl = imp_implementationWithBlock(^(id obj) {
-		if (!ttxAppActive) {
-			TTXCount(ttxPauseCalls, obj);
-			if (ttxBackgroundAudio) {
-				TTXCount(ttxPauseBlocked, obj);
-				return;
-			}
-		}
-		orig(obj, sel);
-	});
-	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
-	[ttxInstalled addObject:[NSString stringWithFormat:@"%@ -pause", className]];
+// Hook cac method void lien quan den pause/stop/play/background cua class player.
+// Khi app o nen: dem so lan goi (cho bao cao chan doan) va chan cac method "pause..."
+// de video khong bi dung. Moi block giu IMP goc cua class do nen hook ca class cha
+// lan class con khong bi de quy.
+static BOOL TTXIsTraceSelector(NSString *name) {
+	NSString *lower = name.lowercaseString;
+	for (NSString *kw in @[@"pause", @"stop", @"play", @"background", @"resignactive", @"interrupt"]) {
+		if ([lower containsString:kw]) return YES;
+	}
+	return NO;
 }
+
+// Tra ve YES neu da chan, NO neu can goi IMP goc
+static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
+	if (ttxAppActive) return NO;
+	NSString *key = [NSString stringWithFormat:@"%@ -%@", NSStringFromClass(object_getClass(obj)), NSStringFromSelector(sel)];
+	@synchronized (ttxPauseCalls) {
+		[ttxPauseCalls addObject:key];
+	}
+	if (!blockable || !ttxBackgroundAudio) return NO;
+	@synchronized (ttxPauseBlocked) {
+		[ttxPauseBlocked addObject:key];
+	}
+	return YES;
+}
+
+static BOOL TTXHookBackgroundMethod(Class cls, Method method) {
+	SEL sel = method_getName(method);
+	NSString *name = NSStringFromSelector(sel);
+	if (!TTXIsTraceSelector(name)) return NO;
+
+	char ret[8] = {0};
+	method_getReturnType(method, ret, sizeof(ret));
+	if (ret[0] != 'v') return NO;
+
+	BOOL blockable = [name.lowercaseString hasPrefix:@"pause"];
+	unsigned int nargs = method_getNumberOfArguments(method);
+	if (nargs == 2) {
+		__block void (*orig)(id, SEL) = NULL;
+		IMP repl = imp_implementationWithBlock(^(id obj) {
+			if (TTXBackgroundCall(obj, sel, blockable)) return;
+			orig(obj, sel);
+		});
+		MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		return YES;
+	}
+	if (nargs != 3) return NO;
+
+	char arg[8] = {0};
+	method_getArgumentType(method, 2, arg, sizeof(arg));
+	if (arg[0] == '@') {
+		__block void (*orig)(id, SEL, id) = NULL;
+		IMP repl = imp_implementationWithBlock(^(id obj, id a) {
+			if (TTXBackgroundCall(obj, sel, blockable)) return;
+			orig(obj, sel, a);
+		});
+		MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		return YES;
+	}
+	// Tham so so nguyen / BOOL nam trong thanh ghi x2, chuyen tiep nguyen ven (arm64)
+	if (arg[0] && strchr("BcCsSiIlLqQ", arg[0])) {
+		__block void (*orig)(id, SEL, long) = NULL;
+		IMP repl = imp_implementationWithBlock(^(id obj, long a) {
+			if (TTXBackgroundCall(obj, sel, blockable)) return;
+			orig(obj, sel, a);
+		});
+		MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		return YES;
+	}
+	return NO;
+}
+
+static void TTXHookBackgroundClass(NSString *className) {
+	Class cls = NSClassFromString(className);
+	if (!cls) return;
+	NSUInteger hooked = 0;
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+	for (unsigned int i = 0; i < count; i++) {
+		if (TTXHookBackgroundMethod(cls, methods[i])) hooked++;
+	}
+	free(methods);
+	[ttxInstalled addObject:[NSString stringWithFormat:@"%@: %lu method", className, (unsigned long)hooked]];
+}
+
+// TikTok kiem tra applicationState de tu dung / khong phat khi app khong active.
+// Khi bat nhac nen va app dang o nen, bao cho TikTok la app van dang mo.
+%hook UIApplication
+- (UIApplicationState)applicationState {
+	if (ttxBackgroundAudio && !ttxAppActive) return UIApplicationStateActive;
+	return %orig;
+}
+%end
 
 #pragma mark - Auto next
 
@@ -178,13 +249,13 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.3 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.4 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
 	[lines addObject:[NSString stringWithFormat:@"AudioSession: %@", [AVAudioSession sharedInstance].category]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits]];
-	[lines addObject:[NSString stringWithFormat:@"Pause khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
+	[lines addObject:[NSString stringWithFormat:@"Goi khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
 	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
 	[lines addObject:@"--- Hook da cai ---"];
 	[lines addObjectsFromArray:ttxInstalled];
@@ -254,7 +325,7 @@ static void TTXShowDiagnostics(void) {
 		});
 	}];
 
-	for (NSString *name in TTXPauseClasses()) TTXHookPause(name);
+	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
 
 	%init;
