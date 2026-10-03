@@ -165,6 +165,28 @@ static void TTXHookBackgroundClass(NSString *className) {
 
 // TikTok kiem tra applicationState de tu dung / khong phat khi app khong active.
 // Khi bat nhac nen va app dang o nen, bao cho TikTok la app van dang mo.
+// Cong tac "Am thanh nen" trong menu nhan giu video: bam vao thi TikTok goi
+// setIsEnabledForLongPressPanel:YES + addEnableScene:, va trang chu phat nen duoc.
+// TikTok tu dat lai ve NO nen giu no luon bat. Tham so scene khai bao long de ARC
+// khong retain (khong ro kieu that), chi chuyen tiep.
+%hook AWEBackgroundAudioSettingsManager
+- (BOOL)isEnabledForLongPressPanel {
+	return ttxBackgroundAudio ? YES : %orig;
+}
+
+- (void)setIsEnabledForLongPressPanel:(BOOL)enabled {
+	%orig(ttxBackgroundAudio ? YES : enabled);
+}
+
+- (BOOL)isEnableScene:(long)scene {
+	return ttxBackgroundAudio ? YES : %orig;
+}
+
+- (BOOL)isCurrentSceneEnable:(long)scene {
+	return ttxBackgroundAudio ? YES : %orig;
+}
+%end
+
 %hook UIApplication
 - (UIApplicationState)applicationState {
 	if (ttxBackgroundAudio && !ttxAppActive) return UIApplicationStateActive;
@@ -559,7 +581,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.10 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.11 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
