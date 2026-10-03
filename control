@@ -1,8 +1,8 @@
 Package: com.anlai.tiktokx
 Name: TikTokX
-Version: 1.0.5
+Version: 1.0.6
 Architecture: iphoneos-arm64
-Description: Bat/tat phat nhac nen va tu dong cuon video tiep theo cho TikTok
+Description: Background play and auto scroll for TikTok
 Maintainer: AnLai
 Author: AnLai
 Section: Tweaks
