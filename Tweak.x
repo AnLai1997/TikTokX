@@ -11,7 +11,8 @@ static BOOL ttxDiagnostics = kTTXDefaultDiagnostics;
 // Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
 static NSArray<NSString *> *TTXPauseClasses(void) {
 	return @[@"TTVideoEngine", @"AWENewFeedTableViewController", @"TTKMediaVideoPlayerController",
-		@"TTKMediaPlayerController", @"AWEVideoPlayerController", @"AWEAVPlayerWrapper_TTVideoEngine"];
+		@"TTKMediaPlayerController", @"AWEVideoPlayerController", @"AWEAVPlayerWrapper_TTVideoEngine",
+		@"AWENewAwemeDetailTableViewController"];
 }
 static NSArray<NSString *> *TTXLoopClasses(void) {
 	return @[@"TTKMediaVideoPlayerController", @"AWEVideoPlayerController", @"TTKMediaPlayerController", @"AWEPlayVideoPlayerController",
@@ -349,6 +350,82 @@ static void TTXHookLoop(NSString *className) {
 }
 %end
 
+#pragma mark - Background switches
+
+// Trang tim kiem phat nen duoc, trang chu thi khong: tim cong tac phat nen cua TikTok.
+// Getter BOOL co chu "background": ten mang nghia cam (pause/stop/disable...) -> NO,
+// mang nghia cho phep (play/support/enable/allow/can) -> YES. Chi khi bat nhac nen.
+static NSMutableArray<NSString *> *ttxBgSwitches;
+
+static void TTXForceBackgroundGetters(Class cls) {
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+	for (unsigned int i = 0; i < count; i++) {
+		Method method = methods[i];
+		SEL sel = method_getName(method);
+		NSString *lower = NSStringFromSelector(sel).lowercaseString;
+		if (![lower containsString:@"background"] || method_getNumberOfArguments(method) != 2) continue;
+		char ret[8] = {0};
+		method_getReturnType(method, ret, sizeof(ret));
+		if (!(ret[0] == 'B' || ret[0] == 'c')) continue;
+
+		BOOL (^has)(NSArray *) = ^BOOL(NSArray *words) {
+			for (NSString *w in words) {
+				if ([lower containsString:w]) return YES;
+			}
+			return NO;
+		};
+		if (has(@[@"ignore", @"color", @"cancel"])) continue;
+		BOOL value;
+		if (has(@[@"pause", @"stop", @"disable", @"forbid"])) {
+			value = NO;
+		} else if (has(@[@"play", @"support", @"enable", @"allow", @"can"])) {
+			value = YES;
+		} else {
+			[ttxBgSwitches addObject:[NSString stringWithFormat:@"%@ -%@ (giu nguyen)", NSStringFromClass(cls), NSStringFromSelector(sel)]];
+			continue;
+		}
+
+		__block BOOL (*orig)(id, SEL) = NULL;
+		IMP repl = imp_implementationWithBlock(^BOOL(id obj) {
+			if (ttxBackgroundAudio) return value;
+			return orig(obj, sel);
+		});
+		MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+		[ttxBgSwitches addObject:[NSString stringWithFormat:@"%@ -%@ = %@", NSStringFromClass(cls), NSStringFromSelector(sel), value ? @"YES" : @"NO"]];
+	}
+	free(methods);
+}
+
+// Class trong app co ten lien quan den phat nen (chi doc ten, khong realize toan bo class)
+static void TTXScanBackgroundClasses(void) {
+	NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSetWithArray:TTXPauseClasses()];
+	NSString *bundlePath = [NSBundle mainBundle].bundlePath;
+	NSUInteger matched = 0;
+	for (uint32_t img = 0; img < _dyld_image_count() && matched < 30; img++) {
+		const char *imagePath = _dyld_get_image_name(img);
+		if (!imagePath || ![@(imagePath) hasPrefix:bundlePath]) continue;
+		unsigned int count = 0;
+		const char **classNames = objc_copyClassNamesForImage(imagePath, &count);
+		for (unsigned int i = 0; i < count && matched < 30; i++) {
+			NSString *name = @(classNames[i]);
+			if ([name containsString:@"BackgroundPlay"] || [name containsString:@"PlayInBackground"]
+				|| [name containsString:@"BackgroundAudio"] || [name containsString:@"BGPlay"]) {
+				[names addObject:name];
+				matched++;
+			}
+		}
+		free(classNames);
+	}
+	[ttxBgSwitches addObject:[NSString stringWithFormat:@"Class phat nen: %lu", (unsigned long)matched]];
+	for (NSString *name in names) {
+		Class cls = NSClassFromString(name);
+		if (!cls) continue;
+		if (![TTXPauseClasses() containsObject:name]) [ttxBgSwitches addObject:name];
+		TTXForceBackgroundGetters(cls);
+	}
+}
+
 #pragma mark - Play in background
 
 // Trang chu khong tu goi playInBackground khi vao nen nen trinh phat dung o tang duoi
@@ -393,7 +470,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.8 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.9 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -403,6 +480,8 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
 	[lines addObject:@"--- Hook da cai ---"];
 	[lines addObject:[NSString stringWithFormat:@"playInBackground da goi: %@", ttxPlayInBackgroundInfo]];
+	[lines addObject:@"--- Cong tac phat nen ---"];
+	[lines addObjectsFromArray:ttxBgSwitches];
 	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
 	[lines addObject:@"--- Method ---"];
@@ -482,6 +561,9 @@ static void TTXShowDiagnostics(void) {
 	TTXForceBool(@"AWENewFeedTableViewController", @"playInBackground", NO);
 	TTXForceBool(@"TTKMediaVideoPlayerController", @"playInBackground", NO);
 	TTXForceBool(@"AWENewFeedTableViewController", @"shouldIgnoreDisappearPause", YES);
+
+	ttxBgSwitches = [NSMutableArray array];
+	TTXScanBackgroundClasses();
 
 	%init;
 }
