@@ -1,13 +1,42 @@
 #import "Headers.h"
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <mach-o/dyld.h>
+#import <substrate.h>
 
 static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
 static BOOL ttxDiagnostics = kTTXDefaultDiagnostics;
 
-// Dem so lan hook duoc goi, dung cho bao cao chan doan
-static NSUInteger ttxLoopHits, ttxAutoNextHits, ttxPauseBlocked;
+// Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
+static NSArray<NSString *> *TTXPauseClasses(void) {
+	return @[@"TTVideoEngine", @"AWENewFeedTableViewController", @"TTKMediaVideoPlayerController",
+		@"TTKMediaPlayerController", @"AWEVideoPlayerController", @"AWEAVPlayerWrapper_TTVideoEngine"];
+}
+static NSArray<NSString *> *TTXLoopClasses(void) {
+	return @[@"TTKMediaVideoPlayerController", @"AWEVideoPlayerController", @"TTKMediaPlayerController", @"AWEPlayVideoPlayerController"];
+}
+
+// Dem hook nao duoc goi, dung cho bao cao chan doan
+static NSCountedSet *ttxPauseCalls, *ttxPauseBlocked, *ttxLoopCalls;
+static NSUInteger ttxAutoNextHits;
+static NSMutableArray<NSString *> *ttxInstalled;
+
+static void TTXCount(NSCountedSet *set, id obj) {
+	@synchronized (set) {
+		[set addObject:NSStringFromClass(object_getClass(obj))];
+	}
+}
+
+static NSString *TTXDescribeCounts(NSCountedSet *set) {
+	NSMutableArray *parts = [NSMutableArray array];
+	@synchronized (set) {
+		for (NSString *name in set) {
+			[parts addObject:[NSString stringWithFormat:@"%@x%lu", name, (unsigned long)[set countForObject:name]]];
+		}
+	}
+	return parts.count ? [parts componentsJoinedByString:@", "] : @"0";
+}
 
 static void TTXLoadPrefs(void) {
 	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kTTXSuite];
@@ -29,21 +58,6 @@ static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFSt
 // nen khong goi UIApplication truc tiep o do
 static volatile BOOL ttxAppActive = YES;
 
-static BOOL TTXAppIsActive(void) {
-	return ttxAppActive;
-}
-
-// Tim view controller cua feed co the cuon sang video tiep theo
-static UIViewController *TTXFeedControllerFrom(id obj) {
-	if (![obj isKindOfClass:[UIViewController class]]) return nil;
-	UIViewController *vc = obj;
-	while (vc) {
-		if ([vc respondsToSelector:@selector(scrollToNextVideo)]) return vc;
-		vc = vc.parentViewController;
-	}
-	return nil;
-}
-
 #pragma mark - Background audio
 
 static void TTXConfigureAudioSession(void) {
@@ -53,112 +67,133 @@ static void TTXConfigureAudioSession(void) {
 	[session setActive:YES error:nil];
 }
 
-%hook AWEPlayVideoPlayerController
-// Chan TikTok tu pause video khi app vao nen
-- (void)pause {
-	if (ttxBackgroundAudio && !TTXAppIsActive()) {
-		ttxPauseBlocked++;
-		return;
-	}
-	%orig;
-}
+// Hook -pause cua tung class bang block rieng (moi block giu IMP goc cua class do,
+// tranh de quy khi ca class cha va class con deu bi hook)
+static void TTXHookPause(NSString *className) {
+	Class cls = NSClassFromString(className);
+	SEL sel = @selector(pause);
+	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+	if (!method || method_getNumberOfArguments(method) != 2) return;
 
-// Video phat het -> cuon sang video tiep theo thay vi lap lai
-- (void)playerWillLoopPlaying:(id)player {
-	ttxLoopHits++;
-	if (ttxAutoNext && [self respondsToSelector:@selector(container)]) {
-		UIViewController *feed = TTXFeedControllerFrom(self.container);
-		if (feed) {
-			ttxAutoNextHits++;
-			dispatch_async(dispatch_get_main_queue(), ^{
-				[(AWENewFeedTableViewController *)feed scrollToNextVideo];
-			});
-			return;
+	__block void (*orig)(id, SEL) = NULL;
+	IMP repl = imp_implementationWithBlock(^(id obj) {
+		if (!ttxAppActive) {
+			TTXCount(ttxPauseCalls, obj);
+			if (ttxBackgroundAudio) {
+				TTXCount(ttxPauseBlocked, obj);
+				return;
+			}
 		}
-	}
-	%orig;
+		orig(obj, sel);
+	});
+	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+	[ttxInstalled addObject:[NSString stringWithFormat:@"%@ -pause", className]];
 }
-%end
 
-%hook TTVideoEngine
-- (void)pause {
-	if (ttxBackgroundAudio && !TTXAppIsActive()) {
-		ttxPauseBlocked++;
-		return;
+#pragma mark - Auto next
+
+static __weak UIViewController *ttxVisibleFeed;
+static CFAbsoluteTime ttxLastScroll;
+
+static UIView *TTXPlayerView(id player) {
+	for (NSString *name in @[@"view", @"playerView", @"containerView"]) {
+		SEL sel = NSSelectorFromString(name);
+		if (![player respondsToSelector:sel]) continue;
+		id view = ((id (*)(id, SEL))objc_msgSend)(player, sel);
+		if ([view isKindOfClass:[UIView class]]) return view;
 	}
+	return nil;
+}
+
+// Cuon feed sang video tiep theo neu player vua phat het la video dang hien tren feed
+static BOOL TTXTryScrollNext(id player) {
+	UIViewController *feed = ttxVisibleFeed;
+	if (!feed || !feed.view.window || feed.presentedViewController) return NO;
+	if (![feed respondsToSelector:@selector(scrollToNextVideo)]) return NO;
+
+	UIView *playerView = TTXPlayerView(player);
+	if (playerView && ![playerView isDescendantOfView:feed.view]) return NO;
+
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (now - ttxLastScroll < 1.0) return YES;
+	ttxLastScroll = now;
+	ttxAutoNextHits++;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[(AWENewFeedTableViewController *)feed scrollToNextVideo];
+	});
+	return YES;
+}
+
+static void TTXHookLoop(NSString *className) {
+	Class cls = NSClassFromString(className);
+	SEL sel = @selector(playerWillLoopPlaying:);
+	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+	if (!method || method_getNumberOfArguments(method) != 3) return;
+
+	__block void (*orig)(id, SEL, id) = NULL;
+	IMP repl = imp_implementationWithBlock(^(id obj, id arg) {
+		TTXCount(ttxLoopCalls, obj);
+		if (ttxAutoNext && TTXTryScrollNext(obj)) return;
+		orig(obj, sel, arg);
+	});
+	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
+	[ttxInstalled addObject:[NSString stringWithFormat:@"%@ -playerWillLoopPlaying:", className]];
+}
+
+%hook AWENewFeedTableViewController
+- (void)viewDidAppear:(BOOL)animated {
 	%orig;
+	ttxVisibleFeed = self;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+	%orig;
+	if (ttxVisibleFeed == self) ttxVisibleFeed = nil;
 }
 %end
 
 #pragma mark - Diagnostics
 
-static NSString *TTXCheckMethod(NSString *className, NSString *selName) {
+// Liet ke method lien quan cua cac class dang nghi ngo
+static NSString *TTXMethodDump(NSString *className) {
 	Class cls = NSClassFromString(className);
-	if (!cls) return [NSString stringWithFormat:@"[X] %@ (khong co class)", className];
-	BOOL has = class_getInstanceMethod(cls, NSSelectorFromString(selName)) != NULL;
-	return [NSString stringWithFormat:@"[%@] %@ -%@", has ? @"OK" : @"X", className, selName];
-}
-
-// Liet ke class cua TikTok co ten lien quan, de tim class bi doi ten.
-// Chi doc ten class trong binary cua app (khong realize toan bo class nhu objc_copyClassList,
-// vi lam vay co the crash app lon nhu TikTok).
-static NSArray<NSString *> *TTXCandidateClasses(void) {
-	NSArray *nameHints = @[@"PlayVideoPlayer", @"FeedTableViewController", @"VideoEngine", @"PlayerController"];
-	NSArray *selHints = @[@"scrollToNextVideo", @"playerWillLoopPlaying:", @"playerDidFinishPlaying:"];
-	NSString *bundlePath = [NSBundle mainBundle].bundlePath;
-	NSMutableArray *result = [NSMutableArray array];
-
-	for (uint32_t img = 0; img < _dyld_image_count() && result.count < 60; img++) {
-		const char *imagePath = _dyld_get_image_name(img);
-		if (!imagePath || ![@(imagePath) hasPrefix:bundlePath]) continue;
-
-		unsigned int count = 0;
-		const char **names = objc_copyClassNamesForImage(imagePath, &count);
-		for (unsigned int i = 0; i < count && result.count < 60; i++) {
-			NSString *name = @(names[i]);
-			BOOL nameMatch = NO;
-			for (NSString *hint in nameHints) {
-				if ([name containsString:hint]) nameMatch = YES;
+	if (!cls) return [NSString stringWithFormat:@"%@: (khong co class)", className];
+	NSArray *keywords = @[@"pause", @"Pause", @"loop", @"Loop", @"Background", @"background", @"ResignActive", @"resignActive", @"finish", @"Finish", @"NextVideo"];
+	NSMutableArray *found = [NSMutableArray array];
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+	for (unsigned int i = 0; i < count && found.count < 25; i++) {
+		NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+		for (NSString *kw in keywords) {
+			if ([sel containsString:kw]) {
+				[found addObject:sel];
+				break;
 			}
-			if (!nameMatch) continue;
-
-			NSMutableArray *matched = [NSMutableArray array];
-			Class cls = objc_getClass(names[i]);
-			if (cls) {
-				unsigned int mcount = 0;
-				Method *methods = class_copyMethodList(cls, &mcount);
-				for (unsigned int m = 0; m < mcount; m++) {
-					NSString *sel = NSStringFromSelector(method_getName(methods[m]));
-					if ([selHints containsObject:sel]) [matched addObject:sel];
-				}
-				free(methods);
-			}
-			[result addObject:matched.count ? [NSString stringWithFormat:@"%@ {%@}", name, [matched componentsJoinedByString:@", "]] : name];
 		}
-		free(names);
 	}
-	return result;
+	free(methods);
+	return [NSString stringWithFormat:@"%@ (%@): %@", className, NSStringFromClass(class_getSuperclass(cls)), [found componentsJoinedByString:@" "]];
 }
 
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
-	NSArray *bgModes = info[@"UIBackgroundModes"];
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.2 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.3 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
-	[lines addObject:[NSString stringWithFormat:@"Bundle: %@", [NSBundle mainBundle].bundleIdentifier]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
-	[lines addObject:[NSString stringWithFormat:@"UIBackgroundModes: %@", bgModes.count ? [bgModes componentsJoinedByString:@","] : @"(khong co)"]];
-	[lines addObject:[NSString stringWithFormat:@"Dem: loop=%lu autoNext=%lu pauseChan=%lu",
-		(unsigned long)ttxLoopHits, (unsigned long)ttxAutoNextHits, (unsigned long)ttxPauseBlocked]];
-	[lines addObject:@"--- Hook ---"];
-	[lines addObject:TTXCheckMethod(@"AWEPlayVideoPlayerController", @"playerWillLoopPlaying:")];
-	[lines addObject:TTXCheckMethod(@"AWEPlayVideoPlayerController", @"pause")];
-	[lines addObject:TTXCheckMethod(@"AWEPlayVideoPlayerController", @"container")];
-	[lines addObject:TTXCheckMethod(@"AWENewFeedTableViewController", @"scrollToNextVideo")];
-	[lines addObject:TTXCheckMethod(@"TTVideoEngine", @"pause")];
-	[lines addObject:@"--- Class lien quan ---"];
-	[lines addObjectsFromArray:TTXCandidateClasses()];
+	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
+	[lines addObject:[NSString stringWithFormat:@"AudioSession: %@", [AVAudioSession sharedInstance].category]];
+	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits]];
+	[lines addObject:[NSString stringWithFormat:@"Pause khi o nen: %@", TTXDescribeCounts(ttxPauseCalls)]];
+	[lines addObject:[NSString stringWithFormat:@"Pause da chan: %@", TTXDescribeCounts(ttxPauseBlocked)]];
+	[lines addObject:@"--- Hook da cai ---"];
+	[lines addObjectsFromArray:ttxInstalled];
+	[lines addObject:@"--- Method ---"];
+	NSMutableOrderedSet *classes = [NSMutableOrderedSet orderedSetWithArray:TTXPauseClasses()];
+	[classes addObjectsFromArray:TTXLoopClasses()];
+	for (NSString *name in classes) {
+		[lines addObject:TTXMethodDump(name)];
+	}
 	return [lines componentsJoinedByString:@"\n"];
 }
 
@@ -189,6 +224,11 @@ static void TTXShowDiagnostics(void) {
 %ctor {
 	TTXLoadPrefs();
 	NSLog(@"[TikTokX] loaded in %@", [NSBundle mainBundle].bundleIdentifier);
+	ttxPauseCalls = [NSCountedSet set];
+	ttxPauseBlocked = [NSCountedSet set];
+	ttxLoopCalls = [NSCountedSet set];
+	ttxInstalled = [NSMutableArray array];
+
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
 		CFSTR(kTTXPrefsChanged), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
@@ -201,17 +241,21 @@ static void TTXShowDiagnostics(void) {
 		ttxAppActive = YES;
 	}];
 
-	// Hien bao cao khi mo app va moi lan quay lai tu nen
+	// Class cua TikTok nam trong binary chinh, da load khi %ctor chay
 	[nc addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			TTXShowDiagnostics();
 		});
 	}];
+	// Hien bao cao moi lan quay lai tu nen
 	[nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			TTXShowDiagnostics();
 		});
 	}];
+
+	for (NSString *name in TTXPauseClasses()) TTXHookPause(name);
+	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
 
 	%init;
 }
