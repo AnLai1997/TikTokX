@@ -467,6 +467,20 @@ static void TTXForceBackgroundGetters(Class cls) {
 	free(methods);
 }
 
+// Class cua cac nut trong menu nhan giu (tu cuon, xoa man hinh). Moi nut la mot
+// AWEShareBaseChannel nhu TTKBackgroundAudioChannel.
+static BOOL TTXIsFeatureClass(NSString *name) {
+	for (NSString *kw in @[@"AutoScroll", @"AutoPlayNext", @"AutoSlide", @"AutoNext",
+		@"ClearScreen", @"ClearMode", @"CleanMode", @"ClearDisplay", @"CleanScreen", @"PureMode"]) {
+		if ([name containsString:kw]) return YES;
+	}
+	if (![name hasSuffix:@"Channel"]) return NO;
+	for (NSString *kw in @[@"Clear", @"Clean", @"Pure", @"AutoPlay", @"Scroll"]) {
+		if ([name containsString:kw]) return YES;
+	}
+	return NO;
+}
+
 // Class trong app co ten lien quan den phat nen (chi doc ten, khong realize toan bo class)
 static void TTXScanBackgroundClasses(void) {
 	NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSetWithArray:TTXPauseClasses()];
@@ -483,8 +497,7 @@ static void TTXScanBackgroundClasses(void) {
 				|| [name containsString:@"BackgroundAudio"] || [name containsString:@"BGPlay"]) {
 				[names addObject:name];
 				matched++;
-			} else if (ttxAutoScrollClasses.count < 12 && ([name containsString:@"AutoScroll"] || [name containsString:@"AutoPlayNext"]
-				|| [name containsString:@"AutoSlide"] || [name containsString:@"AutoNext"])) {
+			} else if (ttxAutoScrollClasses.count < 30 && TTXIsFeatureClass(name)) {
 				[ttxAutoScrollClasses addObject:name];
 			}
 		}
@@ -632,7 +645,7 @@ static NSString *TTXMethodDump(NSString *className) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.12 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.13 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Feed dang hien: %@", ttxVisibleFeed ? @"co" : @"khong"]];
@@ -648,7 +661,7 @@ static NSString *TTXDiagnosticReport(void) {
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
 	[lines addObject:@"--- Method class phat nen ---"];
 	for (NSString *name in TTXAudioComponentClasses()) [lines addObject:TTXFullMethodDump(name)];
-	[lines addObject:@"--- Class tu cuon ---"];
+	[lines addObject:@"--- Class tu cuon / xoa man hinh ---"];
 	for (NSString *name in ttxAutoScrollClasses) [lines addObject:TTXFullMethodDump(name)];
 	[lines addObjectsFromArray:ttxBoolHooks];
 	[lines addObjectsFromArray:ttxInstalled];
