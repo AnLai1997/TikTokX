@@ -9,10 +9,6 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        scheme: [rootful, rootless]
     env:
       THEOS: ${{ github.workspace }}/theos
     steps:
@@ -33,14 +29,12 @@ jobs:
       - name: Build package
         run: |
           set -o pipefail
-          ARGS="FINALPACKAGE=1"
-          if [ "${{ matrix.scheme }}" = "rootless" ]; then ARGS="$ARGS THEOS_PACKAGE_SCHEME=rootless"; fi
-          if ! gmake package $ARGS 2>&1 | tee build.log; then
+          if ! gmake package FINALPACKAGE=1 2>&1 | tee build.log; then
             grep -iE "error|fatal|undefined" build.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
             exit 1
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TikTokX-${{ matrix.scheme }}
+          name: TikTokX-Dopamine
           path: packages/*.deb
