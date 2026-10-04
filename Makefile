@@ -10,7 +10,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = TikTokX
 TikTokX_FILES = Tweak.x
 TikTokX_CFLAGS = -fobjc-arc
-TikTokX_FRAMEWORKS = UIKit AVFoundation
+TikTokX_FRAMEWORKS = UIKit AVFoundation MediaPlayer
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 

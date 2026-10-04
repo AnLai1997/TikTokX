@@ -415,6 +415,80 @@ static void TTXHookLoop(NSString *className) {
 }
 %end
 
+#pragma mark - Remote commands
+
+// Man hinh khoa / Control Center: TikTok dang ky 2 nut tua (skip +-15s).
+// Tat 2 nut tua, thay bang nut bai truoc / bai sau de cuon feed len / xuong.
+static NSUInteger ttxRemoteNext, ttxRemotePrev;
+static NSString *ttxRemoteInfo = @"-";
+
+// Cuon feed len 1 video. Chay tren main thread.
+static void TTXScrollPrevious(void) {
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (now - ttxLastScroll < 0.5) return;
+
+	UIViewController *feed = ttxVisibleFeed;
+	if (feed && (!feed.view.window || feed.presentedViewController)) feed = nil;
+	for (NSString *name in @[@"scrollToPreviousVideo", @"scrollToPrevVideo"]) {
+		SEL sel = NSSelectorFromString(name);
+		if (![feed respondsToSelector:sel]) continue;
+		ttxLastScroll = now;
+		((void (*)(id, SEL))objc_msgSend)(feed, sel);
+		ttxRemoteInfo = [NSString stringWithFormat:@"len: %@ -%@", NSStringFromClass([feed class]), name];
+		return;
+	}
+
+	UIViewController *top = feed ?: TTXTopViewController();
+	UIScrollView *sv = TTXFindPagedFeed(top.view) ?: TTXFindFeedScrollView(top.view);
+	CGFloat h = sv.bounds.size.height;
+	if (!sv || h < 1) {
+		ttxRemoteInfo = @"len: khong tim thay feed";
+		return;
+	}
+	CGFloat prev = (round(sv.contentOffset.y / h) - 1) * h;
+	if (prev < -sv.contentInset.top - 1) return; // dang o video dau
+	ttxLastScroll = now;
+	ttxRemoteInfo = [NSString stringWithFormat:@"len: %@ (scroll view)", NSStringFromClass([sv class])];
+	[sv setContentOffset:CGPointMake(sv.contentOffset.x, prev) animated:YES];
+	// Mot so feed chi phat video moi khi nguoi dung tu vuot xong
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		if ([sv.delegate respondsToSelector:@selector(scrollViewDidEndDecelerating:)]) {
+			[sv.delegate scrollViewDidEndDecelerating:sv];
+		}
+	});
+}
+
+// Chay tren main thread
+static void TTXSetupRemoteCommands(void) {
+	MPRemoteCommandCenter *center = [MPRemoteCommandCenter sharedCommandCenter];
+	center.skipForwardCommand.enabled = NO;
+	center.skipBackwardCommand.enabled = NO;
+
+	static BOOL added;
+	if (!added) {
+		added = YES;
+		[center.nextTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+			ttxRemoteNext++;
+			if (!TTXTryScrollNext(nil)) TTXScrollNextGeneric(nil);
+			return MPRemoteCommandHandlerStatusSuccess;
+		}];
+		[center.previousTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+			ttxRemotePrev++;
+			TTXScrollPrevious();
+			return MPRemoteCommandHandlerStatusSuccess;
+		}];
+	}
+	center.nextTrackCommand.enabled = YES;
+	center.previousTrackCommand.enabled = YES;
+}
+
+// TikTok co the bat lai nut tua khi doi video: luon giu tat
+%hook MPSkipIntervalCommand
+- (void)setEnabled:(BOOL)enabled {
+	%orig(NO);
+}
+%end
+
 #pragma mark - Background switches
 
 // Trang tim kiem phat nen duoc, trang chu thi khong: tim cong tac phat nen cua TikTok.
@@ -623,10 +697,11 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.15 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.16 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@)", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
 	[lines addObject:@"--- Class tu cuon / xoa man hinh ---"];
@@ -654,6 +729,7 @@ static void TTXLogDiagnostics(void) {
 	[nc addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		ttxAppActive = NO;
 		TTXConfigureAudioSession();
+		TTXSetupRemoteCommands();
 	}];
 	[nc addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		TTXPlayInBackground();
@@ -664,6 +740,7 @@ static void TTXLogDiagnostics(void) {
 
 	// Class cua TikTok nam trong binary chinh, da load khi %ctor chay
 	[nc addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+		TTXSetupRemoteCommands();
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			TTXLogDiagnostics();
 		});
