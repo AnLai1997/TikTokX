@@ -6,7 +6,6 @@
 
 static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
-static BOOL ttxDiagnostics = kTTXDefaultDiagnostics;
 
 // Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
 static NSArray<NSString *> *TTXPauseClasses(void) {
@@ -45,11 +44,9 @@ static void TTXLoadPrefs(void) {
 	[prefs registerDefaults:@{
 		kTTXBackgroundAudio: @(kTTXDefaultBackgroundAudio),
 		kTTXAutoNext: @(kTTXDefaultAutoNext),
-		kTTXDiagnostics: @(kTTXDefaultDiagnostics),
 	}];
 	ttxBackgroundAudio = [prefs boolForKey:kTTXBackgroundAudio];
 	ttxAutoNext = [prefs boolForKey:kTTXAutoNext];
-	ttxDiagnostics = [prefs boolForKey:kTTXDiagnostics];
 }
 
 static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
@@ -626,7 +623,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.14 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.15 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
@@ -637,28 +634,9 @@ static NSString *TTXDiagnosticReport(void) {
 	return [lines componentsJoinedByString:@"\n"];
 }
 
-static void TTXShowDiagnostics(void) {
-	if (!ttxDiagnostics) return;
-	NSString *report = TTXDiagnosticReport();
-	NSLog(@"[TikTokX]\n%@", report);
-
-	UIWindow *window = nil;
-	for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-			if (w.isKeyWindow) window = w;
-		}
-	}
-	UIViewController *top = window.rootViewController;
-	while (top.presentedViewController) top = top.presentedViewController;
-	if (!top) return;
-
-	UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TikTokX - Chan doan" message:report preferredStyle:UIAlertControllerStyleAlert];
-	[alert addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-		[UIPasteboard generalPasteboard].string = report;
-	}]];
-	[alert addAction:[UIAlertAction actionWithTitle:@"Dong" style:UIAlertActionStyleCancel handler:nil]];
-	[top presentViewController:alert animated:YES completion:nil];
+// Chi ghi vao syslog, khong hien popup
+static void TTXLogDiagnostics(void) {
+	NSLog(@"[TikTokX]\n%@", TTXDiagnosticReport());
 }
 
 %ctor {
@@ -687,13 +665,13 @@ static void TTXShowDiagnostics(void) {
 	// Class cua TikTok nam trong binary chinh, da load khi %ctor chay
 	[nc addObserverForName:UIApplicationDidFinishLaunchingNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			TTXShowDiagnostics();
+			TTXLogDiagnostics();
 		});
 	}];
-	// Hien bao cao moi lan quay lai tu nen
+	// Ghi bao cao moi lan quay lai tu nen
 	[nc addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			TTXShowDiagnostics();
+			TTXLogDiagnostics();
 		});
 	}];
 
