@@ -1,1 +1,0 @@
-	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) ]];
