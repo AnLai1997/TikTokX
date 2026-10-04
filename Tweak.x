@@ -458,6 +458,79 @@ static void TTXScrollPrevious(void) {
 	});
 }
 
+// MRMediaRemoteCommand: nextTrack=4, previousTrack=5, skipForward=17, skipBackward=18.
+// TikTok co the dung command center rieng (khong phai sharedCommandCenter), vd. tren CarPlay,
+// nen nhan dien command theo loai thay vi so sanh con tro. Tra ve 1 = xuong, -1 = len, 0 = khac.
+static int TTXRemoteDirection(MPRemoteCommand *cmd) {
+	MPRemoteCommandCenter *center = [MPRemoteCommandCenter sharedCommandCenter];
+	if (cmd == center.nextTrackCommand || cmd == center.skipForwardCommand) return 1;
+	if (cmd == center.previousTrackCommand || cmd == center.skipBackwardCommand) return -1;
+	@try {
+		NSInteger type = [[cmd valueForKey:@"mediaRemoteCommandType"] integerValue];
+		if (type == 4 || type == 17) return 1;
+		if (type == 5 || type == 18) return -1;
+	} @catch (NSException *e) {}
+	return 0;
+}
+
+static NSCountedSet *ttxRemoteWrapped;
+
+// Moi command co the co nhieu target (cua TikTok + cua tweak) nen chong cuon 2 lan
+static void TTXRemoteScroll(int direction, MPRemoteCommand *cmd) {
+	static CFAbsoluteTime last;
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	if (now - last < 0.3) return;
+	last = now;
+	NSString *source = NSStringFromClass(object_getClass(cmd));
+	if (direction > 0) {
+		ttxRemoteNext++;
+		if (!TTXTryScrollNext(nil)) TTXScrollNextGeneric(nil);
+		ttxRemoteInfo = [NSString stringWithFormat:@"xuong tu %@: %@", source, ttxLastScrollInfo];
+	} else {
+		ttxRemotePrev++;
+		TTXScrollPrevious();
+		ttxRemoteInfo = [NSString stringWithFormat:@"tu %@, %@", source, ttxRemoteInfo];
+	}
+}
+
+// Thay handler cua nut bai truoc/bai sau/tua bang lenh cuon feed
+static MPRemoteCommandHandlerStatus (^TTXWrapHandler(MPRemoteCommand *cmd, MPRemoteCommandHandlerStatus (^handler)(MPRemoteCommandEvent *)))(MPRemoteCommandEvent *) {
+	TTXCount(ttxRemoteWrapped, cmd);
+	__weak MPRemoteCommand *weakCmd = cmd;
+	return ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+		MPRemoteCommand *c = weakCmd ?: event.command;
+		int direction = TTXRemoteDirection(c);
+		if (!direction) return handler ? handler(event) : MPRemoteCommandHandlerStatusCommandFailed;
+		if ([NSThread isMainThread]) TTXRemoteScroll(direction, c);
+		else dispatch_async(dispatch_get_main_queue(), ^{ TTXRemoteScroll(direction, c); });
+		return MPRemoteCommandHandlerStatusSuccess;
+	};
+}
+
+%hook MPRemoteCommand
+- (id)addTargetWithHandler:(MPRemoteCommandHandlerStatus (^)(MPRemoteCommandEvent *))handler {
+	if (!TTXRemoteDirection(self)) return %orig;
+	return %orig(TTXWrapHandler(self, handler));
+}
+
+- (void)addTarget:(id)target action:(SEL)action {
+	if (!TTXRemoteDirection(self)) {
+		%orig;
+		return;
+	}
+	[self addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
+		return MPRemoteCommandHandlerStatusSuccess;
+	}];
+}
+%end
+
+// TikTok co the bat lai nut tua khi doi video: luon giu tat de hien nut bai truoc / bai sau
+%hook MPSkipIntervalCommand
+- (void)setEnabled:(BOOL)enabled {
+	%orig(NO);
+}
+%end
+
 // Chay tren main thread
 static void TTXSetupRemoteCommands(void) {
 	MPRemoteCommandCenter *center = [MPRemoteCommandCenter sharedCommandCenter];
@@ -467,27 +540,16 @@ static void TTXSetupRemoteCommands(void) {
 	static BOOL added;
 	if (!added) {
 		added = YES;
-		[center.nextTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
-			ttxRemoteNext++;
-			if (!TTXTryScrollNext(nil)) TTXScrollNextGeneric(nil);
+		// Handler duoc hook MPRemoteCommand thay bang lenh cuon
+		MPRemoteCommandHandlerStatus (^noop)(MPRemoteCommandEvent *) = ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
 			return MPRemoteCommandHandlerStatusSuccess;
-		}];
-		[center.previousTrackCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
-			ttxRemotePrev++;
-			TTXScrollPrevious();
-			return MPRemoteCommandHandlerStatusSuccess;
-		}];
+		};
+		[center.nextTrackCommand addTargetWithHandler:noop];
+		[center.previousTrackCommand addTargetWithHandler:noop];
 	}
 	center.nextTrackCommand.enabled = YES;
 	center.previousTrackCommand.enabled = YES;
 }
-
-// TikTok co the bat lai nut tua khi doi video: luon giu tat
-%hook MPSkipIntervalCommand
-- (void)setEnabled:(BOOL)enabled {
-	%orig(NO);
-}
-%end
 
 #pragma mark - Background switches
 
@@ -697,11 +759,11 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.16 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.17 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
-	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@)", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
 	[lines addObject:@"--- Class tu cuon / xoa man hinh ---"];
@@ -720,6 +782,7 @@ static void TTXLogDiagnostics(void) {
 	ttxPauseCalls = [NSCountedSet set];
 	ttxPauseBlocked = [NSCountedSet set];
 	ttxLoopCalls = [NSCountedSet set];
+	ttxRemoteWrapped = [NSCountedSet set];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
