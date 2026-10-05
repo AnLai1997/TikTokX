@@ -1,6 +1,6 @@
 Package: com.anlai.tiktokx
 Name: TikTokX
-Version: 1.0.19
+Version: 1.0.20
 Architecture: iphoneos-arm64
 Description: Background play and auto scroll for TikTok
 Maintainer: AnLai
