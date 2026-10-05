@@ -8,6 +8,11 @@
 #define kTTXLanguage      @"language"
 #define kTTXRepoURL       @"https://github.com/AnLai1997/TikTokX"
 
+// Co trong Preferences.framework nhung header cua Theos khong khai bao
+@interface PSSpecifier (TTXPrivate)
+- (void)setValues:(NSArray *)values titles:(NSArray *)titles;
+@end
+
 #ifndef TTX_VERSION
 #define TTX_VERSION "?"
 #endif
