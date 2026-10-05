@@ -16,21 +16,27 @@
 #endif
 
 // Bit trong state cua notification (TikTok bi sandbox nen khong doc duoc plist,
-// nhung doc duoc state nay). bit8 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
-// bit3 = doi nut tua thanh bai truoc / bai sau.
-#define kTTXStateValid       (1ULL << 8)
+// nhung doc duoc state nay). bit9 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
+// bit3 = doi nut tua thanh bai truoc / bai sau, bit4 = an giao dien phu tren video.
+#define kTTXStateValid       (1ULL << 9)
 #define kTTXStateBackground  (1ULL << 1)
 #define kTTXStateAutoNext    (1ULL << 2)
 #define kTTXStateRemoteScroll (1ULL << 3)
+#define kTTXStateClearDisplay (1ULL << 4)
 
 static id TTXPrefValue(CFStringRef key) {
 	CFPropertyListRef value = CFPreferencesCopyAppValue(key, kTTXSuite);
 	return value ? (__bridge_transfer id)value : nil;
 }
 
+// "Clear Display" mac dinh tat, cac cong tac khac mac dinh bat
+static BOOL TTXDefaultFor(NSString *key) {
+	return ![key isEqualToString:@"clearDisplay"];
+}
+
 static BOOL TTXPrefBool(CFStringRef key) {
 	id obj = TTXPrefValue(key);
-	return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : YES;
+	return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : TTXDefaultFor((__bridge NSString *)key);
 }
 
 // Ghi gia tri hien tai vao state roi bao cho TikTok doc lai
@@ -40,6 +46,7 @@ static void TTXPublishPrefs(void) {
 	if (TTXPrefBool(CFSTR("backgroundAudio"))) state |= kTTXStateBackground;
 	if (TTXPrefBool(CFSTR("autoNext"))) state |= kTTXStateAutoNext;
 	if (TTXPrefBool(CFSTR("remoteScroll"))) state |= kTTXStateRemoteScroll;
+	if (TTXPrefBool(CFSTR("clearDisplay"))) state |= kTTXStateClearDisplay;
 
 	int token;
 	if (notify_register_check(kTTXPrefsChanged, &token) == NOTIFY_STATUS_OK) {
@@ -67,6 +74,8 @@ static NSString *TTXText(NSString *key) {
 				@"autoNext.info": @"Move to the next video when the current one finishes.",
 				@"remoteScroll": @"Skip → Next/Previous",
 				@"remoteScroll.info": @"Replace the ±15s buttons on the lock screen and Control Center with previous/next to scroll the feed.",
+				@"clearDisplay": @"Clear Display",
+				@"clearDisplay.info": @"Always hide the buttons, caption and other overlays on top of videos.",
 				@"language": @"Language",
 				@"about": @"TikTokX %@\nAuthor: AnLai\nLicense: MIT\n© 2026 AnLai",
 			},
@@ -77,6 +86,8 @@ static NSString *TTXText(NSString *key) {
 				@"autoNext.info": @"Tự chuyển sang video tiếp theo khi video hiện tại phát xong.",
 				@"remoteScroll": @"Nút tua → Bài trước/sau",
 				@"remoteScroll.info": @"Thay nút tua ±15s trên màn hình khóa và Control Center bằng nút bài trước/bài sau để cuộn feed.",
+				@"clearDisplay": @"Loại bỏ yếu tố trên màn hình",
+				@"clearDisplay.info": @"Luôn ẩn các nút, chú thích và lớp giao diện khác phủ trên video.",
 				@"language": @"Ngôn ngữ",
 				@"about": @"TikTokX %@\nTác giả: AnLai\nGiấy phép: MIT\n© 2026 AnLai",
 			},
@@ -97,7 +108,7 @@ static NSString *TTXText(NSString *key) {
 		detail:nil cell:PSSwitchCell edit:nil];
 	[sw setProperty:@"com.anlai.tiktokx" forKey:@"defaults"];
 	[sw setProperty:key forKey:@"key"];
-	[sw setProperty:@YES forKey:@"default"];
+	[sw setProperty:@(TTXDefaultFor(key)) forKey:@"default"];
 	return @[group, sw];
 }
 
@@ -105,7 +116,7 @@ static NSString *TTXText(NSString *key) {
 	if (!_specifiers) {
 		self.title = @"TikTokX";
 		NSMutableArray *specs = [NSMutableArray array];
-		for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll"]) {
+		for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay"]) {
 			[specs addObjectsFromArray:[self switchSpecifiersForKey:key]];
 		}
 
