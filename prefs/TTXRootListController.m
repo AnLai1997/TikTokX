@@ -2,8 +2,8 @@
 #import <Preferences/PSSpecifier.h>
 #import <notify.h>
 
-#define kTTXSuite         CFSTR("com.anlai.tiktokx")
-#define kTTXPrefsChanged  "com.anlai.tiktokx/prefsChanged"
+#define kTTXSuite         CFSTR("com.tiktokx")
+#define kTTXPrefsChanged  "com.tiktokx/prefsChanged"
 #define kTTXLanguage      @"language"
 
 // Co trong Preferences.framework nhung header cua Theos khong khai bao
@@ -56,6 +56,19 @@ static void TTXPublishPrefs(void) {
 	notify_post(kTTXPrefsChanged);
 }
 
+// Ban truoc 1.0.31 luu cai dat o com.anlai.tiktokx: chep sang ten moi neu chua co
+static void TTXMigrateOldPrefs(void) {
+	CFStringRef oldSuite = CFSTR("com.anlai.tiktokx");
+	for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay", kTTXLanguage]) {
+		if (TTXPrefValue((__bridge CFStringRef)key)) continue;
+		CFPropertyListRef value = CFPreferencesCopyAppValue((__bridge CFStringRef)key, oldSuite);
+		if (!value) continue;
+		CFPreferencesSetAppValue((__bridge CFStringRef)key, value, kTTXSuite);
+		CFRelease(value);
+	}
+	CFPreferencesAppSynchronize(kTTXSuite);
+}
+
 // Ngon ngu da chon; chua chon thi mac dinh tieng Anh
 static NSString *TTXLanguage(void) {
 	NSString *lang = TTXPrefValue((__bridge CFStringRef)kTTXLanguage);
@@ -106,7 +119,7 @@ static NSString *TTXText(NSString *key) {
 	PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:TTXText(key) target:self
 		set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
 		detail:nil cell:PSSwitchCell edit:nil];
-	[sw setProperty:@"com.anlai.tiktokx" forKey:@"defaults"];
+	[sw setProperty:@"com.tiktokx" forKey:@"defaults"];
 	[sw setProperty:key forKey:@"key"];
 	[sw setProperty:@(TTXDefaultFor(key)) forKey:@"default"];
 	return @[group, sw];
@@ -114,6 +127,7 @@ static NSString *TTXText(NSString *key) {
 
 - (NSArray *)specifiers {
 	if (!_specifiers) {
+		TTXMigrateOldPrefs();
 		self.title = @"TikTokX";
 		NSMutableArray *specs = [NSMutableArray array];
 		for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay"]) {
@@ -124,7 +138,7 @@ static NSString *TTXText(NSString *key) {
 		PSSpecifier *lang = [PSSpecifier preferenceSpecifierNamed:TTXText(@"language") target:self
 			set:@selector(setPreferenceValue:specifier:) get:@selector(readLanguage:)
 			detail:nil cell:PSSegmentCell edit:nil];
-		[lang setProperty:@"com.anlai.tiktokx" forKey:@"defaults"];
+		[lang setProperty:@"com.tiktokx" forKey:@"defaults"];
 		[lang setProperty:kTTXLanguage forKey:@"key"];
 		[lang setValues:@[@"en", @"vi"] titles:@[@"English", @"Tiếng Việt"]];
 		[specs addObject:lang];
