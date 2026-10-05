@@ -49,11 +49,10 @@ static void TTXPublishPrefs(void) {
 	notify_post(kTTXPrefsChanged);
 }
 
-// Ngon ngu da chon; chua chon thi theo ngon ngu cua may
+// Ngon ngu da chon; chua chon thi mac dinh tieng Anh
 static NSString *TTXLanguage(void) {
 	NSString *lang = TTXPrefValue((__bridge CFStringRef)kTTXLanguage);
-	if ([lang isKindOfClass:[NSString class]]) return lang;
-	return [[NSLocale preferredLanguages].firstObject hasPrefix:@"vi"] ? @"vi" : @"en";
+	return [lang isKindOfClass:[NSString class]] ? lang : @"en";
 }
 
 static NSString *TTXText(NSString *key) {
@@ -116,7 +115,7 @@ static NSString *TTXText(NSString *key) {
 			detail:nil cell:PSSegmentCell edit:nil];
 		[lang setProperty:@"com.anlai.tiktokx" forKey:@"defaults"];
 		[lang setProperty:kTTXLanguage forKey:@"key"];
-		[lang setValues:@[@"vi", @"en"] titles:@[@"Tiếng Việt", @"English"]];
+		[lang setValues:@[@"en", @"vi"] titles:@[@"English", @"Tiếng Việt"]];
 		[specs addObject:lang];
 
 		PSSpecifier *about = [PSSpecifier emptyGroupSpecifier];
