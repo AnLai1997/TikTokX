@@ -39,14 +39,23 @@ static NSString *TTXDescribeCounts(NSCountedSet *set) {
 	return parts.count ? [parts componentsJoinedByString:@", "] : @"0";
 }
 
+// TikTok bi sandbox: NSUserDefaults suite doc plist trong container cua app,
+// khong thay file Settings ghi o /var/mobile/Library/Preferences.
+// Doc qua cfprefsd voi user "mobile", fallback doc file truc tiep.
+static BOOL TTXReadBool(NSString *key, BOOL fallback, NSDictionary *file) {
+	CFPropertyListRef value = CFPreferencesCopyValue((__bridge CFStringRef)key, (__bridge CFStringRef)kTTXSuite,
+		CFSTR("mobile"), kCFPreferencesAnyHost);
+	id obj = value ? (__bridge_transfer id)value : file[key];
+	return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : fallback;
+}
+
 static void TTXLoadPrefs(void) {
-	NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:kTTXSuite];
-	[prefs registerDefaults:@{
-		kTTXBackgroundAudio: @(kTTXDefaultBackgroundAudio),
-		kTTXAutoNext: @(kTTXDefaultAutoNext),
-	}];
-	ttxBackgroundAudio = [prefs boolForKey:kTTXBackgroundAudio];
-	ttxAutoNext = [prefs boolForKey:kTTXAutoNext];
+	CFPreferencesSynchronize((__bridge CFStringRef)kTTXSuite, CFSTR("mobile"), kCFPreferencesAnyHost);
+	NSDictionary *file = [NSDictionary dictionaryWithContentsOfFile:
+		[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", kTTXSuite]];
+	ttxBackgroundAudio = TTXReadBool(kTTXBackgroundAudio, kTTXDefaultBackgroundAudio, file);
+	ttxAutoNext = TTXReadBool(kTTXAutoNext, kTTXDefaultAutoNext, file);
+	NSLog(@"[TikTokX] prefs: backgroundAudio=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext);
 }
 
 static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
