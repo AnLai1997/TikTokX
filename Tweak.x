@@ -8,6 +8,7 @@
 static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
 static BOOL ttxRemoteScroll = kTTXDefaultRemoteScroll;
+static BOOL ttxClearDisplay = kTTXDefaultClearDisplay;
 
 // Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
 static NSArray<NSString *> *TTXPauseClasses(void) {
@@ -61,6 +62,7 @@ static void TTXLoadPrefs(void) {
 		ttxBackgroundAudio = (state & kTTXStateBackground) != 0;
 		ttxAutoNext = (state & kTTXStateAutoNext) != 0;
 		ttxRemoteScroll = (state & kTTXStateRemoteScroll) != 0;
+		ttxClearDisplay = (state & kTTXStateClearDisplay) != 0;
 		source = @"notify";
 	} else {
 		NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:
@@ -68,18 +70,21 @@ static void TTXLoadPrefs(void) {
 		ttxBackgroundAudio = TTXReadBool(kTTXBackgroundAudio, kTTXDefaultBackgroundAudio, prefs);
 		ttxAutoNext = TTXReadBool(kTTXAutoNext, kTTXDefaultAutoNext, prefs);
 		ttxRemoteScroll = TTXReadBool(kTTXRemoteScroll, kTTXDefaultRemoteScroll, prefs);
+		ttxClearDisplay = TTXReadBool(kTTXClearDisplay, kTTXDefaultClearDisplay, prefs);
 		source = @"plist";
 	}
-	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll);
+	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
 }
 
 static void TTXSetupRemoteCommands(void);
+static void TTXUpdateClearDisplay(void);
 
 static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
 	TTXLoadPrefs();
-	// Doi nut tren man hinh khoa ngay khi gat cong tac
+	// Doi nut tren man hinh khoa va giao dien video ngay khi gat cong tac
 	dispatch_async(dispatch_get_main_queue(), ^{
 		TTXSetupRemoteCommands();
+		TTXUpdateClearDisplay();
 	});
 }
 
@@ -112,10 +117,15 @@ static BOOL TTXIsTraceSelector(NSString *name) {
 static __weak id ttxCurrentPlayer;
 static SEL ttxDisplaySel;
 
+static void TTXScheduleClearDisplay(id player);
+
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
 	if (ttxAppActive) {
-		if (sel == ttxDisplaySel) ttxCurrentPlayer = obj;
+		if (sel == ttxDisplaySel) {
+			ttxCurrentPlayer = obj;
+			TTXScheduleClearDisplay(obj);
+		}
 		return NO;
 	}
 	NSString *key = [NSString stringWithFormat:@"%@ -%@", NSStringFromClass(object_getClass(obj)), NSStringFromSelector(sel)];
@@ -412,6 +422,7 @@ static void TTXHookLoop(NSString *className) {
 	__block void (*orig)(id, SEL, id) = NULL;
 	IMP repl = imp_implementationWithBlock(^(id obj, id arg) {
 		TTXCount(ttxLoopCalls, obj);
+		if (ttxAppActive) TTXScheduleClearDisplay(obj);
 		// O nen TikTok co the tu cuon (isAutoPlayEnabled): de no lam truoc, chi cuon neu feed dung yen
 		if (ttxAutoNext && !ttxAppActive) {
 			orig(obj, sel, arg);
@@ -437,6 +448,7 @@ static void TTXHookLoop(NSString *className) {
 - (void)viewDidAppear:(BOOL)animated {
 	%orig;
 	ttxVisibleFeed = self;
+	TTXScheduleClearDisplay(ttxCurrentPlayer);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -444,6 +456,103 @@ static void TTXHookLoop(NSString *className) {
 	if (ttxVisibleFeed == self) ttxVisibleFeed = nil;
 }
 %end
+
+#pragma mark - Clear display
+
+// Nhu nut "Loai bo cac yeu to tren man hinh" trong menu nhan giu: an moi view nam tren video
+// trong o feed (nut thich / binh luan, chu thich, ten nhac...). Che bang mask rong thay vi
+// hidden / alpha vi TikTok tu dat lai hai gia tri nay khi doi video.
+static NSHashTable<UIView *> *ttxClearedViews;
+static const void *kTTXClearedMask = &kTTXClearedMask;
+static const void *kTTXClearedInteraction = &kTTXClearedInteraction;
+static NSString *const kTTXClearMaskName = @"TTXClearDisplay";
+static NSString *ttxClearInfo = @"-";
+
+static void TTXClearView(UIView *view) {
+	if ([view.layer.mask.name isEqualToString:kTTXClearMaskName]) return;
+	if (![ttxClearedViews containsObject:view]) {
+		[ttxClearedViews addObject:view];
+		objc_setAssociatedObject(view, kTTXClearedMask, view.layer.mask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(view, kTTXClearedInteraction, @(view.userInteractionEnabled), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	CALayer *mask = [CALayer layer];
+	mask.name = kTTXClearMaskName;
+	view.layer.mask = mask;
+	view.userInteractionEnabled = NO;
+}
+
+// View gan bang ca o (lop chua nut, lop nhan cham dung / thich video) thi khong che ma di vao
+// trong, de cham vao video van hoat dong; view nho hon thi che han.
+static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
+	CGFloat area = view.bounds.size.width * view.bounds.size.height;
+	if (area >= pageArea * 0.8) {
+		if (depth >= 4) return;
+		for (UIView *sub in view.subviews) TTXClearOverlay(sub, pageArea, depth + 1);
+		return;
+	}
+	TTXClearView(view);
+}
+
+// Chay tren main thread
+static void TTXApplyClearDisplay(id player) {
+	if (!ttxClearDisplay || !player) return;
+	UIView *playerView = TTXPlayerView(player);
+	if (!playerView.window) return;
+
+	// O feed chua video: cell cua table / collection view, hoac trang con truc tiep cua scroll view
+	UIView *page = nil;
+	for (UIView *v = playerView; v.superview; v = v.superview) {
+		if ([v isKindOfClass:[UITableViewCell class]] || [v isKindOfClass:[UICollectionViewCell class]]
+			|| [v.superview isKindOfClass:[UIScrollView class]]) {
+			page = v;
+			break;
+		}
+	}
+	if (!page || page == playerView) {
+		ttxClearInfo = [NSString stringWithFormat:@"khong tim thay o feed (%@)", NSStringFromClass([playerView class])];
+		return;
+	}
+
+	CGFloat pageArea = page.bounds.size.width * page.bounds.size.height;
+	NSUInteger before = ttxClearedViews.count;
+	// Moi view nam sau (tuc la ve de len tren) video hoac to tien cua video trong o
+	for (UIView *a = playerView; a != page; a = a.superview) {
+		NSArray<UIView *> *siblings = a.superview.subviews;
+		NSUInteger idx = [siblings indexOfObjectIdenticalTo:a];
+		if (idx == NSNotFound) continue;
+		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearOverlay(siblings[i], pageArea, 0);
+	}
+	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%lu, tong %lu", NSStringFromClass([playerView class]),
+		NSStringFromClass([page class]), (unsigned long)(ttxClearedViews.count - before), (unsigned long)ttxClearedViews.count];
+}
+
+// TikTok them nut / chu thich tre sau khi video hien nen che lai vai lan
+static void TTXScheduleClearDisplay(id player) {
+	if (!ttxClearDisplay || !player) return;
+	__weak id weakPlayer = player;
+	for (NSNumber *delay in @[@0, @0.5, @1.5]) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			TTXApplyClearDisplay(weakPlayer);
+		});
+	}
+}
+
+// Chay tren main thread: tat cong tac thi tra lai mask va tuong tac ban dau
+static void TTXUpdateClearDisplay(void) {
+	if (ttxClearDisplay) {
+		TTXScheduleClearDisplay(ttxCurrentPlayer);
+		return;
+	}
+	for (UIView *view in ttxClearedViews.allObjects) {
+		if ([view.layer.mask.name isEqualToString:kTTXClearMaskName]) view.layer.mask = objc_getAssociatedObject(view, kTTXClearedMask);
+		NSNumber *interaction = objc_getAssociatedObject(view, kTTXClearedInteraction);
+		view.userInteractionEnabled = interaction ? interaction.boolValue : YES;
+		objc_setAssociatedObject(view, kTTXClearedMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(view, kTTXClearedInteraction, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	[ttxClearedViews removeAllObjects];
+	ttxClearInfo = @"da tra lai";
+}
 
 #pragma mark - Remote commands
 
@@ -824,9 +933,10 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.17 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.24 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
-	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll]];
+	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
+	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
@@ -848,6 +958,7 @@ static void TTXLogDiagnostics(void) {
 	ttxPauseBlocked = [NSCountedSet set];
 	ttxLoopCalls = [NSCountedSet set];
 	ttxRemoteWrapped = [NSCountedSet set];
+	ttxClearedViews = [NSHashTable weakObjectsHashTable];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
