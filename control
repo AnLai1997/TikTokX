@@ -1,6 +1,6 @@
 Package: com.anlai.tiktokx
 Name: TikTokX
-Version: 1.0.27
+Version: 1.0.28
 Architecture: iphoneos-arm64
 Maintainer: AnLai
 Author: AnLai
@@ -14,7 +14,8 @@ Description: Background play, auto scroll and lock screen controls for TikTok
  - Auto Scroll: move to the next video when the current one finishes.
  - Skip -> Next/Previous: replace the 15s skip buttons on the lock screen and
    Control Center with previous/next to scroll the feed.
- - Clear Display: always hide the buttons, caption and overlays on videos.
+ - Clear Display: hide the buttons, caption and overlays on videos;
+   tap the video to show them for 3 seconds.
  .
  Settings are in English or Vietnamese. Requires Dopamine (rootless).
  License: MIT. Author: AnLai.
