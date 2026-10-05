@@ -567,6 +567,8 @@ static UIView *TTXFindPage(UIView *playerView) {
 // Dang hien lai giao dien sau khi cham vao video
 static BOOL ttxClearRevealed;
 static NSUInteger ttxRevealToken;
+// O video dang che gan nhat, de nhan cham
+static __weak UIView *ttxClearPage;
 
 // Chay tren main thread
 static void TTXApplyClearDisplay(id player) {
@@ -580,6 +582,7 @@ static void TTXApplyClearDisplay(id player) {
 		return;
 	}
 
+	ttxClearPage = page;
 	CGFloat pageArea = page.bounds.size.width * page.bounds.size.height;
 	NSUInteger before = ttxClearedViews.count;
 	// Moi view nam sau (tuc la ve de len tren) video hoac to tien cua video trong o
@@ -631,24 +634,38 @@ static void TTXRevealClearDisplay(void) {
 	});
 }
 
-// Chi tinh cham (khong phai vuot) bang mot ngon tren o video dang hien,
-// de vuot sang video khac khong lam hien giao dien
+// Chi tinh cham (khong phai vuot / giu) bang mot ngon trong o video dang che, de vuot sang
+// video khac khong lam hien giao dien. Gesture cham cua TikTok co the huy touch (phase
+// Cancelled) va touch.view co the nam ngoai o, nen so vi tri cham voi khung cua o.
 static CGPoint ttxTouchStart;
+static CFAbsoluteTime ttxTouchStartTime;
+static NSUInteger ttxTapSeen, ttxTapReveal;
 
 static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
-	NSSet<UITouch *> *touches = [event touchesForWindow:window];
+	NSSet<UITouch *> *touches = event.allTouches;
 	if (touches.count != 1) return;
 	UITouch *touch = touches.anyObject;
 	CGPoint p = [touch locationInView:nil];
 	if (touch.phase == UITouchPhaseBegan) {
 		ttxTouchStart = p;
+		ttxTouchStartTime = CFAbsoluteTimeGetCurrent();
 		if (ttxClearRevealed) TTXRevealClearDisplay();
 		return;
 	}
-	if (touch.phase != UITouchPhaseEnded || ttxClearRevealed) return;
-	if (hypot(p.x - ttxTouchStart.x, p.y - ttxTouchStart.y) > 10) return;
-	UIView *page = TTXFindPage(TTXPlayerView(ttxCurrentPlayer));
-	if (!page || !touch.view || ![touch.view isDescendantOfView:page]) return;
+	if (touch.phase != UITouchPhaseEnded && touch.phase != UITouchPhaseCancelled) return;
+	if (ttxClearRevealed || hypot(p.x - ttxTouchStart.x, p.y - ttxTouchStart.y) > 15
+		|| CFAbsoluteTimeGetCurrent() - ttxTouchStartTime > 0.6) return;
+	ttxTapSeen++;
+	UIView *page = ttxClearPage;
+	if (!page.window || page.window != touch.window) {
+		NSLog(@"[TikTokX] cham: khong co o video (%@)", page ? NSStringFromClass([page class]) : @"nil");
+		return;
+	}
+	if (!CGRectContainsPoint([page convertRect:page.bounds toView:nil], p)) {
+		NSLog(@"[TikTokX] cham ngoai o video");
+		return;
+	}
+	ttxTapReveal++;
 	TTXRevealClearDisplay();
 }
 
@@ -1038,10 +1055,10 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.28 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.29 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
-	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
