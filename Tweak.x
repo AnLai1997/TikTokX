@@ -493,6 +493,27 @@ static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
 	TTXClearView(view);
 }
 
+// Nut nam ngoai khung video hoac nam ngay trong player (vd. "Toan man hinh" cua video ngang):
+// che moi nut / chu / view nhan cham nho trong ca o, tru video va view chua video.
+static NSMutableOrderedSet<NSString *> *ttxClearControlClasses;
+
+static void TTXClearControls(UIView *view, UIView *playerView, CGFloat pageArea, int depth) {
+	if (depth > 12) return;
+	for (UIView *sub in view.subviews) {
+		BOOL holdsPlayer = [playerView isDescendantOfView:sub];
+		CGFloat area = sub.bounds.size.width * sub.bounds.size.height;
+		if (!holdsPlayer && area < pageArea * 0.8 && ([sub isKindOfClass:[UIControl class]]
+			|| [sub isKindOfClass:[UILabel class]] || sub.gestureRecognizers.count)) {
+			if (![sub.layer.mask.name isEqualToString:kTTXClearMaskName] && ttxClearControlClasses.count < 20) {
+				[ttxClearControlClasses addObject:NSStringFromClass([sub class])];
+			}
+			TTXClearView(sub);
+			continue;
+		}
+		TTXClearControls(sub, playerView, pageArea, depth + 1);
+	}
+}
+
 // Chay tren main thread
 static void TTXApplyClearDisplay(id player) {
 	if (!ttxClearDisplay || !player) return;
@@ -522,15 +543,17 @@ static void TTXApplyClearDisplay(id player) {
 		if (idx == NSNotFound) continue;
 		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearOverlay(siblings[i], pageArea, 0);
 	}
-	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%lu, tong %lu", NSStringFromClass([playerView class]),
-		NSStringFromClass([page class]), (unsigned long)(ttxClearedViews.count - before), (unsigned long)ttxClearedViews.count];
+	TTXClearControls(page, playerView, pageArea, 0);
+	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%lu, tong %lu | nut: %@", NSStringFromClass([playerView class]),
+		NSStringFromClass([page class]), (unsigned long)(ttxClearedViews.count - before), (unsigned long)ttxClearedViews.count,
+		[ttxClearControlClasses.array componentsJoinedByString:@", "]];
 }
 
 // TikTok them nut / chu thich tre sau khi video hien nen che lai vai lan
 static void TTXScheduleClearDisplay(id player) {
 	if (!ttxClearDisplay || !player) return;
 	__weak id weakPlayer = player;
-	for (NSNumber *delay in @[@0, @0.5, @1.5]) {
+	for (NSNumber *delay in @[@0, @0.5, @1.5, @3]) {
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 			TTXApplyClearDisplay(weakPlayer);
 		});
@@ -933,7 +956,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.24 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.25 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
@@ -959,6 +982,7 @@ static void TTXLogDiagnostics(void) {
 	ttxLoopCalls = [NSCountedSet set];
 	ttxRemoteWrapped = [NSCountedSet set];
 	ttxClearedViews = [NSHashTable weakObjectsHashTable];
+	ttxClearControlClasses = [NSMutableOrderedSet orderedSet];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
