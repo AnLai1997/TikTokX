@@ -510,27 +510,41 @@ static BOOL TTXIsFullscreenButton(UIView *view) {
 	return NO;
 }
 
-static BOOL TTXContainsFullscreenButton(UIView *view, int depth) {
-	if (TTXIsFullscreenButton(view)) return YES;
+// Noi dung bai dang dang anh: vung vuot anh (scroll view) hoac anh lon. Khong che va khong
+// di vao trong.
+static BOOL TTXIsMediaContent(UIView *view, CGFloat pageArea) {
+	CGFloat area = view.bounds.size.width * view.bounds.size.height;
+	if (area < pageArea * 0.25) return NO;
+	if ([view isKindOfClass:[UIScrollView class]] || [view isKindOfClass:[UIImageView class]]) return YES;
+	NSString *name = NSStringFromClass([view class]).lowercaseString;
+	return [name containsString:@"photo"] || [name containsString:@"image"];
+}
+
+static void TTXKeep(UIView *view) {
+	TTXRestoreView(view);
+	if (ttxClearKeptClasses.count < 10) [ttxClearKeptClasses addObject:NSStringFromClass([view class])];
+}
+
+static BOOL TTXContainsKeptView(UIView *view, CGFloat pageArea, int depth) {
+	if (TTXIsFullscreenButton(view) || TTXIsMediaContent(view, pageArea)) return YES;
 	if (depth > 6) return NO;
 	for (UIView *sub in view.subviews) {
-		if (TTXContainsFullscreenButton(sub, depth + 1)) return YES;
+		if (TTXContainsKeptView(sub, pageArea, depth + 1)) return YES;
 	}
 	return NO;
 }
 
 // View gan bang ca o (lop chua nut, lop nhan cham dung / thich video) thi khong che ma di vao
-// trong, de cham vao video van hoat dong; view nho hon thi che han. Nut toan man hinh: bo qua,
-// view chua no: di vao trong de che phan con lai.
+// trong, de cham vao video van hoat dong; view nho hon thi che han. Nut toan man hinh va anh
+// cua bai dang: bo qua, view chua chung: di vao trong de che phan con lai.
 static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
-	if (TTXIsFullscreenButton(view)) {
-		TTXRestoreView(view);
-		if (ttxClearKeptClasses.count < 10) [ttxClearKeptClasses addObject:NSStringFromClass([view class])];
+	if (TTXIsFullscreenButton(view) || TTXIsMediaContent(view, pageArea)) {
+		TTXKeep(view);
 		return;
 	}
 	CGFloat area = view.bounds.size.width * view.bounds.size.height;
 	BOOL big = area >= pageArea * 0.8;
-	if (big || TTXContainsFullscreenButton(view, 0)) {
+	if (big || TTXContainsKeptView(view, pageArea, 0)) {
 		if (!big) TTXRestoreView(view);
 		if (depth >= 8) return;
 		for (UIView *sub in view.subviews) TTXClearOverlay(sub, pageArea, depth + 1);
@@ -974,7 +988,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.26 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.27 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
