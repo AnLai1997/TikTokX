@@ -1,12 +1,10 @@
 #import "TTXRootListController.h"
 #import <Preferences/PSSpecifier.h>
 #import <notify.h>
-#import <objc/message.h>
 
 #define kTTXSuite         CFSTR("com.anlai.tiktokx")
 #define kTTXPrefsChanged  "com.anlai.tiktokx/prefsChanged"
 #define kTTXLanguage      @"language"
-#define kTTXRepoURL       @"https://github.com/AnLai1997/TikTokX"
 
 // Co trong Preferences.framework nhung header cua Theos khong khai bao
 @interface PSSpecifier (TTXPrivate)
@@ -71,7 +69,6 @@ static NSString *TTXText(NSString *key) {
 				@"remoteScroll": @"Skip → Next/Previous",
 				@"remoteScroll.info": @"Replace the ±15s buttons on the lock screen and Control Center with previous/next to scroll the feed.",
 				@"language": @"Language",
-				@"source": @"Source Code on GitHub",
 				@"about": @"TikTokX %@\nAuthor: AnLai\nLicense: MIT\n© 2026 AnLai",
 			},
 			@"vi": @{
@@ -82,7 +79,6 @@ static NSString *TTXText(NSString *key) {
 				@"remoteScroll": @"Nút tua → Bài trước/sau",
 				@"remoteScroll.info": @"Thay nút tua ±15s trên màn hình khóa và Control Center bằng nút bài trước/bài sau để cuộn feed.",
 				@"language": @"Ngôn ngữ",
-				@"source": @"Mã nguồn trên GitHub",
 				@"about": @"TikTokX %@\nTác giả: AnLai\nGiấy phép: MIT\n© 2026 AnLai",
 			},
 		};
@@ -127,10 +123,6 @@ static NSString *TTXText(NSString *key) {
 		[about setProperty:[NSString stringWithFormat:TTXText(@"about"), @TTX_VERSION] forKey:@"footerText"];
 		[about setProperty:@(NSTextAlignmentCenter) forKey:@"footerAlignment"];
 		[specs addObject:about];
-		PSSpecifier *source = [PSSpecifier preferenceSpecifierNamed:TTXText(@"source") target:self
-			set:nil get:nil detail:nil cell:PSButtonCell edit:nil];
-		((void (*)(id, SEL, SEL))objc_msgSend)(source, @selector(setButtonAction:), @selector(openSource));
-		[specs addObject:source];
 
 		_specifiers = specs;
 		// State mat sau khi reboot: mo Settings la ghi lai
@@ -151,10 +143,6 @@ static NSString *TTXText(NSString *key) {
 		return;
 	}
 	TTXPublishPrefs();
-}
-
-- (void)openSource {
-	[[UIApplication sharedApplication] openURL:[NSURL URLWithString:kTTXRepoURL] options:@{} completionHandler:nil];
 }
 
 @end
