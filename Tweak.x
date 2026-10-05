@@ -553,22 +553,29 @@ static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
 	TTXClearView(view);
 }
 
-// Chay tren main thread
-static void TTXApplyClearDisplay(id player) {
-	if (!ttxClearDisplay || !player) return;
-	UIView *playerView = TTXPlayerView(player);
-	if (!playerView.window) return;
-
-	// O feed chua video: cell cua table / collection view, hoac trang con truc tiep cua scroll view
-	UIView *page = nil;
+// O feed chua video: cell cua table / collection view, hoac trang con truc tiep cua scroll view
+static UIView *TTXFindPage(UIView *playerView) {
 	for (UIView *v = playerView; v.superview; v = v.superview) {
 		if ([v isKindOfClass:[UITableViewCell class]] || [v isKindOfClass:[UICollectionViewCell class]]
 			|| [v.superview isKindOfClass:[UIScrollView class]]) {
-			page = v;
-			break;
+			return v == playerView ? nil : v;
 		}
 	}
-	if (!page || page == playerView) {
+	return nil;
+}
+
+// Dang hien lai giao dien sau khi cham vao video
+static BOOL ttxClearRevealed;
+static NSUInteger ttxRevealToken;
+
+// Chay tren main thread
+static void TTXApplyClearDisplay(id player) {
+	if (!ttxClearDisplay || ttxClearRevealed || !player) return;
+	UIView *playerView = TTXPlayerView(player);
+	if (!playerView.window) return;
+
+	UIView *page = TTXFindPage(playerView);
+	if (!page) {
 		ttxClearInfo = [NSString stringWithFormat:@"khong tim thay o feed (%@)", NSStringFromClass([playerView class])];
 		return;
 	}
@@ -604,10 +611,53 @@ static void TTXUpdateClearDisplay(void) {
 		TTXScheduleClearDisplay(ttxCurrentPlayer);
 		return;
 	}
+	ttxClearRevealed = NO;
+	ttxRevealToken++;
 	for (UIView *view in ttxClearedViews.allObjects) TTXRestoreView(view);
 	[ttxClearedViews removeAllObjects];
 	ttxClearInfo = @"da tra lai";
 }
+
+// Cham vao video: hien lai giao dien 3 giay de chon nut, roi che tiep. Moi lan cham
+// trong luc dang hien thi tinh lai 3 giay.
+static void TTXRevealClearDisplay(void) {
+	ttxClearRevealed = YES;
+	for (UIView *view in ttxClearedViews.allObjects) TTXRestoreView(view);
+	NSUInteger token = ++ttxRevealToken;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		if (token != ttxRevealToken) return;
+		ttxClearRevealed = NO;
+		TTXApplyClearDisplay(ttxCurrentPlayer);
+	});
+}
+
+// Chi tinh cham (khong phai vuot) bang mot ngon tren o video dang hien,
+// de vuot sang video khac khong lam hien giao dien
+static CGPoint ttxTouchStart;
+
+static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
+	NSSet<UITouch *> *touches = [event touchesForWindow:window];
+	if (touches.count != 1) return;
+	UITouch *touch = touches.anyObject;
+	CGPoint p = [touch locationInView:nil];
+	if (touch.phase == UITouchPhaseBegan) {
+		ttxTouchStart = p;
+		if (ttxClearRevealed) TTXRevealClearDisplay();
+		return;
+	}
+	if (touch.phase != UITouchPhaseEnded || ttxClearRevealed) return;
+	if (hypot(p.x - ttxTouchStart.x, p.y - ttxTouchStart.y) > 10) return;
+	UIView *page = TTXFindPage(TTXPlayerView(ttxCurrentPlayer));
+	if (!page || !touch.view || ![touch.view isDescendantOfView:page]) return;
+	TTXRevealClearDisplay();
+}
+
+%hook UIWindow
+- (void)sendEvent:(UIEvent *)event {
+	%orig;
+	if (ttxClearDisplay && event.type == UIEventTypeTouches) TTXHandleClearTouch(self, event);
+}
+%end
 
 #pragma mark - Remote commands
 
@@ -988,7 +1038,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.27 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.28 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
