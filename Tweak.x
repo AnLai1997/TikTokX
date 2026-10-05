@@ -7,6 +7,7 @@
 
 static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
+static BOOL ttxRemoteScroll = kTTXDefaultRemoteScroll;
 
 // Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
 static NSArray<NSString *> *TTXPauseClasses(void) {
@@ -59,19 +60,27 @@ static void TTXLoadPrefs(void) {
 	if (state & kTTXStateValid) {
 		ttxBackgroundAudio = (state & kTTXStateBackground) != 0;
 		ttxAutoNext = (state & kTTXStateAutoNext) != 0;
+		ttxRemoteScroll = (state & kTTXStateRemoteScroll) != 0;
 		source = @"notify";
 	} else {
 		NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:
 			[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", kTTXSuite]];
 		ttxBackgroundAudio = TTXReadBool(kTTXBackgroundAudio, kTTXDefaultBackgroundAudio, prefs);
 		ttxAutoNext = TTXReadBool(kTTXAutoNext, kTTXDefaultAutoNext, prefs);
+		ttxRemoteScroll = TTXReadBool(kTTXRemoteScroll, kTTXDefaultRemoteScroll, prefs);
 		source = @"plist";
 	}
-	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d", source, ttxBackgroundAudio, ttxAutoNext);
+	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll);
 }
+
+static void TTXSetupRemoteCommands(void);
 
 static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
 	TTXLoadPrefs();
+	// Doi nut tren man hinh khoa ngay khi gat cong tac
+	dispatch_async(dispatch_get_main_queue(), ^{
+		TTXSetupRemoteCommands();
+	});
 }
 
 // Cap nhat tu notification tren main thread; hook pause co the chay o thread khac
@@ -521,11 +530,28 @@ static MPRemoteCommandHandlerStatus (^TTXWrapHandler(MPRemoteCommand *cmd, MPRem
 	return ^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
 		MPRemoteCommand *c = weakCmd ?: event.command;
 		int direction = TTXRemoteDirection(c);
-		if (!direction) return handler ? handler(event) : MPRemoteCommandHandlerStatusCommandFailed;
+		if (!direction || !ttxRemoteScroll) return handler ? handler(event) : MPRemoteCommandHandlerStatusCommandFailed;
 		if ([NSThread isMainThread]) TTXRemoteScroll(direction, c);
 		else dispatch_async(dispatch_get_main_queue(), ^{ TTXRemoteScroll(direction, c); });
 		return MPRemoteCommandHandlerStatusSuccess;
 	};
+}
+
+// Gia tri enabled TikTok muon dat cho tung command, de tra lai khi tat cong tac doi nut
+static const void *kTTXRequestedEnabled = &kTTXRequestedEnabled;
+static BOOL ttxApplyingRemote;
+
+static BOOL TTXIsSkipCommand(MPRemoteCommand *cmd) {
+	return [cmd isKindOfClass:[MPSkipIntervalCommand class]];
+}
+
+// Gia tri enabled thuc te: bat cong tac -> tat nut tua, bat nut bai truoc / bai sau;
+// tat cong tac -> theo TikTok
+static BOOL TTXRemoteEnabled(MPRemoteCommand *cmd, BOOL requested) {
+	if (!TTXRemoteDirection(cmd)) return requested;
+	if (!ttxApplyingRemote) objc_setAssociatedObject(cmd, kTTXRequestedEnabled, @(requested), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	if (!ttxRemoteScroll) return requested;
+	return !TTXIsSkipCommand(cmd);
 }
 
 %hook MPRemoteCommand
@@ -539,24 +565,35 @@ static MPRemoteCommandHandlerStatus (^TTXWrapHandler(MPRemoteCommand *cmd, MPRem
 		%orig;
 		return;
 	}
+	// Giu target cua TikTok de goi lai khi tat cong tac doi nut
+	__weak id weakTarget = target;
 	[self addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent *event) {
-		return MPRemoteCommandHandlerStatusSuccess;
+		id t = weakTarget;
+		if (!t || ![t respondsToSelector:action]) return MPRemoteCommandHandlerStatusCommandFailed;
+		return ((MPRemoteCommandHandlerStatus (*)(id, SEL, id))objc_msgSend)(t, action, event);
 	}];
+}
+
+- (void)setEnabled:(BOOL)enabled {
+	%orig(TTXRemoteEnabled(self, enabled));
 }
 %end
 
-// TikTok co the bat lai nut tua khi doi video: luon giu tat de hien nut bai truoc / bai sau
+// TikTok co the bat lai nut tua khi doi video: giu tat khi bat cong tac doi nut
 %hook MPSkipIntervalCommand
 - (void)setEnabled:(BOOL)enabled {
-	%orig(NO);
+	// %orig co the di qua hook cua MPRemoteCommand: khong ghi de gia tri TikTok muon
+	BOOL value = TTXRemoteEnabled(self, enabled);
+	BOOL applying = ttxApplyingRemote;
+	ttxApplyingRemote = YES;
+	%orig(value);
+	ttxApplyingRemote = applying;
 }
 %end
 
 // Chay tren main thread
 static void TTXSetupRemoteCommands(void) {
 	MPRemoteCommandCenter *center = [MPRemoteCommandCenter sharedCommandCenter];
-	center.skipForwardCommand.enabled = NO;
-	center.skipBackwardCommand.enabled = NO;
 
 	static BOOL added;
 	if (!added) {
@@ -568,8 +605,15 @@ static void TTXSetupRemoteCommands(void) {
 		[center.nextTrackCommand addTargetWithHandler:noop];
 		[center.previousTrackCommand addTargetWithHandler:noop];
 	}
-	center.nextTrackCommand.enabled = YES;
-	center.previousTrackCommand.enabled = YES;
+	// Dat lai enabled theo cong tac; khi tat thi tra ve gia tri TikTok da dat
+	// (nut tua mac dinh bat, nut bai truoc / bai sau mac dinh tat)
+	ttxApplyingRemote = YES;
+	for (MPRemoteCommand *cmd in @[center.skipForwardCommand, center.skipBackwardCommand,
+			center.nextTrackCommand, center.previousTrackCommand]) {
+		NSNumber *requested = objc_getAssociatedObject(cmd, kTTXRequestedEnabled);
+		cmd.enabled = requested ? requested.boolValue : TTXIsSkipCommand(cmd);
+	}
+	ttxApplyingRemote = NO;
 }
 
 #pragma mark - Background switches
@@ -782,7 +826,7 @@ static NSString *TTXDiagnosticReport(void) {
 	NSMutableArray *lines = [NSMutableArray array];
 	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.17 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
-	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d", ttxBackgroundAudio, ttxAutoNext]];
+	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];

@@ -5,10 +5,12 @@
 #define kTTXPrefsChanged  "com.anlai.tiktokx/prefsChanged"
 
 // Bit trong state cua notification (TikTok bi sandbox nen khong doc duoc plist,
-// nhung doc duoc state nay). bit0 = da ghi, bit1 = nhac nen, bit2 = tu cuon.
-#define kTTXStateValid       (1ULL << 0)
+// nhung doc duoc state nay). bit8 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
+// bit3 = doi nut tua thanh bai truoc / bai sau.
+#define kTTXStateValid       (1ULL << 8)
 #define kTTXStateBackground  (1ULL << 1)
 #define kTTXStateAutoNext    (1ULL << 2)
+#define kTTXStateRemoteScroll (1ULL << 3)
 
 static BOOL TTXPrefBool(CFStringRef key) {
 	CFPropertyListRef value = CFPreferencesCopyAppValue(key, kTTXSuite);
@@ -22,6 +24,7 @@ static void TTXPublishPrefs(void) {
 	uint64_t state = kTTXStateValid;
 	if (TTXPrefBool(CFSTR("backgroundAudio"))) state |= kTTXStateBackground;
 	if (TTXPrefBool(CFSTR("autoNext"))) state |= kTTXStateAutoNext;
+	if (TTXPrefBool(CFSTR("remoteScroll"))) state |= kTTXStateRemoteScroll;
 
 	int token;
 	if (notify_register_check(kTTXPrefsChanged, &token) == NOTIFY_STATUS_OK) {
