@@ -3,12 +3,12 @@
 #import <MediaPlayer/MediaPlayer.h>
 
 // Preferences
-#define kTTXSuite            @"com.anlai.tiktokx"
+#define kTTXSuite            @"com.tiktokx"
 #define kTTXBackgroundAudio  @"backgroundAudio"
 #define kTTXAutoNext         @"autoNext"
 #define kTTXRemoteScroll     @"remoteScroll"
 #define kTTXClearDisplay     @"clearDisplay"
-#define kTTXPrefsChanged     "com.anlai.tiktokx/prefsChanged"
+#define kTTXPrefsChanged     "com.tiktokx/prefsChanged"
 
 // Bit trong state cua notification kTTXPrefsChanged (prefs bundle ghi, tweak doc)
 // Doi bit "da ghi" moi khi them cong tac de bo qua state cua ban cu
