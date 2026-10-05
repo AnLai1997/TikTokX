@@ -1,13 +1,13 @@
-Package: com.tiktokx
+Package: tiktokx
 Name: TikTokX
-Version: 1.0.31
+Version: 1.0.32
 Architecture: iphoneos-arm64
 Maintainer: AnLai
 Author: AnLai
 Section: Tweaks
 Depends: mobilesubstrate, preferenceloader
-Conflicts: com.anlai.tiktokx
-Replaces: com.anlai.tiktokx
+Conflicts: com.anlai.tiktokx, com.tiktokx
+Replaces: com.anlai.tiktokx, com.tiktokx
 Icon: file:///var/jb/Library/TikTokX/icon.png
 Description: Background play, auto scroll and lock screen controls for TikTok
  TikTokX adds four features to TikTok, each with its own switch in Settings:
