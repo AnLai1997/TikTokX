@@ -468,6 +468,17 @@ static const void *kTTXClearedInteraction = &kTTXClearedInteraction;
 static NSString *const kTTXClearMaskName = @"TTXClearDisplay";
 static NSString *ttxClearInfo = @"-";
 
+// Tra lai mask va tuong tac ban dau cua view da che
+static void TTXRestoreView(UIView *view) {
+	if (![ttxClearedViews containsObject:view]) return;
+	if ([view.layer.mask.name isEqualToString:kTTXClearMaskName]) view.layer.mask = objc_getAssociatedObject(view, kTTXClearedMask);
+	NSNumber *interaction = objc_getAssociatedObject(view, kTTXClearedInteraction);
+	view.userInteractionEnabled = interaction ? interaction.boolValue : YES;
+	objc_setAssociatedObject(view, kTTXClearedMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(view, kTTXClearedInteraction, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	[ttxClearedViews removeObject:view];
+}
+
 static void TTXClearView(UIView *view) {
 	if ([view.layer.mask.name isEqualToString:kTTXClearMaskName]) return;
 	if (![ttxClearedViews containsObject:view]) {
@@ -481,37 +492,51 @@ static void TTXClearView(UIView *view) {
 	view.userInteractionEnabled = NO;
 }
 
+// Nut "Toan man hinh" cua video ngang luon duoc giu lai. Nhan dien theo ten class
+// hoac chu / accessibilityLabel tren nut.
+static NSMutableOrderedSet<NSString *> *ttxClearKeptClasses;
+
+static BOOL TTXIsFullscreenText(NSString *text) {
+	NSString *lower = text.lowercaseString;
+	return [lower containsString:@"toàn màn hình"] || [lower containsString:@"full screen"] || [lower containsString:@"fullscreen"];
+}
+
+static BOOL TTXIsFullscreenButton(UIView *view) {
+	NSString *name = NSStringFromClass([view class]).lowercaseString;
+	if ([name containsString:@"fullscreen"] || [name containsString:@"landscape"]) return YES;
+	if (TTXIsFullscreenText(view.accessibilityLabel)) return YES;
+	if ([view isKindOfClass:[UILabel class]] && TTXIsFullscreenText(((UILabel *)view).text)) return YES;
+	if ([view isKindOfClass:[UIButton class]] && TTXIsFullscreenText([(UIButton *)view titleForState:UIControlStateNormal])) return YES;
+	return NO;
+}
+
+static BOOL TTXContainsFullscreenButton(UIView *view, int depth) {
+	if (TTXIsFullscreenButton(view)) return YES;
+	if (depth > 6) return NO;
+	for (UIView *sub in view.subviews) {
+		if (TTXContainsFullscreenButton(sub, depth + 1)) return YES;
+	}
+	return NO;
+}
+
 // View gan bang ca o (lop chua nut, lop nhan cham dung / thich video) thi khong che ma di vao
-// trong, de cham vao video van hoat dong; view nho hon thi che han.
+// trong, de cham vao video van hoat dong; view nho hon thi che han. Nut toan man hinh: bo qua,
+// view chua no: di vao trong de che phan con lai.
 static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
+	if (TTXIsFullscreenButton(view)) {
+		TTXRestoreView(view);
+		if (ttxClearKeptClasses.count < 10) [ttxClearKeptClasses addObject:NSStringFromClass([view class])];
+		return;
+	}
 	CGFloat area = view.bounds.size.width * view.bounds.size.height;
-	if (area >= pageArea * 0.8) {
-		if (depth >= 4) return;
+	BOOL big = area >= pageArea * 0.8;
+	if (big || TTXContainsFullscreenButton(view, 0)) {
+		if (!big) TTXRestoreView(view);
+		if (depth >= 8) return;
 		for (UIView *sub in view.subviews) TTXClearOverlay(sub, pageArea, depth + 1);
 		return;
 	}
 	TTXClearView(view);
-}
-
-// Nut nam ngoai khung video hoac nam ngay trong player (vd. "Toan man hinh" cua video ngang):
-// che moi nut / chu / view nhan cham nho trong ca o, tru video va view chua video.
-static NSMutableOrderedSet<NSString *> *ttxClearControlClasses;
-
-static void TTXClearControls(UIView *view, UIView *playerView, CGFloat pageArea, int depth) {
-	if (depth > 12) return;
-	for (UIView *sub in view.subviews) {
-		BOOL holdsPlayer = [playerView isDescendantOfView:sub];
-		CGFloat area = sub.bounds.size.width * sub.bounds.size.height;
-		if (!holdsPlayer && area < pageArea * 0.8 && ([sub isKindOfClass:[UIControl class]]
-			|| [sub isKindOfClass:[UILabel class]] || sub.gestureRecognizers.count)) {
-			if (![sub.layer.mask.name isEqualToString:kTTXClearMaskName] && ttxClearControlClasses.count < 20) {
-				[ttxClearControlClasses addObject:NSStringFromClass([sub class])];
-			}
-			TTXClearView(sub);
-			continue;
-		}
-		TTXClearControls(sub, playerView, pageArea, depth + 1);
-	}
 }
 
 // Chay tren main thread
@@ -543,10 +568,9 @@ static void TTXApplyClearDisplay(id player) {
 		if (idx == NSNotFound) continue;
 		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearOverlay(siblings[i], pageArea, 0);
 	}
-	TTXClearControls(page, playerView, pageArea, 0);
-	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%lu, tong %lu | nut: %@", NSStringFromClass([playerView class]),
-		NSStringFromClass([page class]), (unsigned long)(ttxClearedViews.count - before), (unsigned long)ttxClearedViews.count,
-		[ttxClearControlClasses.array componentsJoinedByString:@", "]];
+	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%ld, tong %lu | giu: %@", NSStringFromClass([playerView class]),
+		NSStringFromClass([page class]), (long)ttxClearedViews.count - (long)before, (unsigned long)ttxClearedViews.count,
+		ttxClearKeptClasses.count ? [ttxClearKeptClasses.array componentsJoinedByString:@", "] : @"-"];
 }
 
 // TikTok them nut / chu thich tre sau khi video hien nen che lai vai lan
@@ -566,13 +590,7 @@ static void TTXUpdateClearDisplay(void) {
 		TTXScheduleClearDisplay(ttxCurrentPlayer);
 		return;
 	}
-	for (UIView *view in ttxClearedViews.allObjects) {
-		if ([view.layer.mask.name isEqualToString:kTTXClearMaskName]) view.layer.mask = objc_getAssociatedObject(view, kTTXClearedMask);
-		NSNumber *interaction = objc_getAssociatedObject(view, kTTXClearedInteraction);
-		view.userInteractionEnabled = interaction ? interaction.boolValue : YES;
-		objc_setAssociatedObject(view, kTTXClearedMask, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-		objc_setAssociatedObject(view, kTTXClearedInteraction, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	}
+	for (UIView *view in ttxClearedViews.allObjects) TTXRestoreView(view);
 	[ttxClearedViews removeAllObjects];
 	ttxClearInfo = @"da tra lai";
 }
@@ -956,7 +974,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.25 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.26 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@", ttxClearInfo]];
@@ -982,7 +1000,7 @@ static void TTXLogDiagnostics(void) {
 	ttxLoopCalls = [NSCountedSet set];
 	ttxRemoteWrapped = [NSCountedSet set];
 	ttxClearedViews = [NSHashTable weakObjectsHashTable];
-	ttxClearControlClasses = [NSMutableOrderedSet orderedSet];
+	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
