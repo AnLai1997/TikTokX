@@ -1030,8 +1030,7 @@ static NSString *TTXDescribeSubviews(UIView *view, int depth) {
 }
 
 // Chay tren main thread, chi khi dang o man hinh xe
-static void TTXApplyCarVideo(id player) {
-	UIView *playerView = TTXPlayerView(player);
+static void TTXApplyCarVideoView(UIView *playerView, id player) {
 	if (!playerView.window) return;
 	UIView *page = TTXFindPage(playerView);
 	if (!page) {
@@ -1056,7 +1055,13 @@ static void TTXApplyCarVideo(id player) {
 		if (TTXFillSuperview(v)) changed++;
 	}
 	CGFloat zoom = 1;
-	CGRect videoRect = TTXVideoRect(player, playerView.bounds, &zoom);
+	// Dat video giua phan player thuc su nhin thay tren man hinh: o tab "De xuat" o feed co the
+	// rong / lech ra ngoai man hinh nen giua o khong phai giua man hinh
+	UIWindow *window = playerView.window;
+	CGRect visible = CGRectIntersection([playerView convertRect:playerView.bounds toView:window], window.bounds);
+	CGRect area = playerView.bounds;
+	if (!CGRectIsNull(visible) && visible.size.width > 1 && visible.size.height > 1) area = [playerView convertRect:visible fromView:window];
+	CGRect videoRect = TTXVideoRect(player, area, &zoom);
 	if (!playerView.clipsToBounds) {
 		TTXSaveView(playerView);
 		playerView.clipsToBounds = YES;
@@ -1064,11 +1069,52 @@ static void TTXApplyCarVideo(id player) {
 	if (oldArea > 0) changed += TTXFillRenderViews(playerView, oldArea, videoRect, 0);
 	TTXSetEnginesFit(player, YES);
 
-	ttxCarVideoInfo = [NSString stringWithFormat:@"o %@ %@ | player %@ %@ -> %@ | phong to %.2f (%@) | sua %lu | %@",
+	ttxCarVideoInfo = [NSString stringWithFormat:@"o %@ %@ | player %@ %@ -> %@ | nhin thay %@ | phong to %.2f (%@) | sua %lu | %@",
 		NSStringFromClass([page class]), NSStringFromCGRect(page.bounds), NSStringFromClass([playerView class]),
-		NSStringFromCGRect(oldFrame), NSStringFromCGRect([playerView convertRect:playerView.bounds toView:page]), zoom,
+		NSStringFromCGRect(oldFrame), NSStringFromCGRect([playerView convertRect:playerView.bounds toView:page]), NSStringFromCGRect(area), zoom,
 		ttxVideoSizeSource, (unsigned long)changed, ttxEngineInfo];
 	if (changed) NSLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
+}
+
+// Lop ve video (theo loai layer / ten class) nam trong o feed chua diem giua man hinh
+static UIView *TTXFindCenterRenderView(UIView *view, CGPoint center, int depth) {
+	if (view.hidden || view.alpha < 0.01) return nil;
+	NSString *layer = NSStringFromClass([view.layer class]);
+	BOOL render = [view.layer isKindOfClass:[AVPlayerLayer class]] || [layer containsString:@"Metal"] || [layer containsString:@"EAGL"]
+		|| [layer containsString:@"SampleBuffer"] || [NSStringFromClass([view class]).lowercaseString containsString:@"render"];
+	if (render && view.superview) {
+		UIView *page = TTXFindPage(view.superview);
+		if (page && CGRectContainsPoint([page convertRect:page.bounds toView:nil], center)) return view;
+	}
+	if (depth > 40) return nil;
+	for (UIView *sub in view.subviews.reverseObjectEnumerator) {
+		UIView *found = TTXFindCenterRenderView(sub, center, depth + 1);
+		if (found) return found;
+	}
+	return nil;
+}
+
+// Player dang hien (ttxCurrentPlayer). Neu no khong nam o giua man hinh (vd. tab "De xuat"
+// dung player khac khong qua hook) thi tim lop ve video o giua man hinh va dung view chua no.
+static NSString *ttxCarVideoSource = @"-";
+
+static void TTXApplyCarVideo(id player, UIWindow *carWindow) {
+	CGPoint center = CGPointMake(CGRectGetMidX(carWindow.bounds), CGRectGetMidY(carWindow.bounds));
+	UIView *playerView = TTXPlayerView(player);
+	UIView *page = playerView.window == carWindow ? TTXFindPage(playerView) : nil;
+	if (page && CGRectContainsPoint([page convertRect:page.bounds toView:nil], center)) {
+		ttxCarVideoSource = NSStringFromClass([player class]);
+		TTXApplyCarVideoView(playerView, player);
+		return;
+	}
+	UIView *render = TTXFindCenterRenderView(carWindow, center, 0);
+	if (!render) {
+		ttxCarVideoSource = @"khong tim thay video o giua";
+		return;
+	}
+	UIView *container = render.superview;
+	ttxCarVideoSource = [NSString stringWithFormat:@"tim theo lop ve %@ trong %@", NSStringFromClass([render class]), NSStringFromClass([container class])];
+	TTXApplyCarVideoView(container, nil);
 }
 
 #pragma mark - Car screen
@@ -1139,6 +1185,7 @@ static void TTXRelayout(UIView *view, int depth) {
 static void TTXCarTick(void) {
 	CGSize target = CGSizeZero;
 	NSString *carWindow = nil;
+	UIWindow *carWin = nil;
 	NSMutableArray *sizes = [NSMutableArray array];
 	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
@@ -1157,13 +1204,14 @@ static void TTXCarTick(void) {
 			if (car && target.width < 1) {
 				target = TTXWindowArea(w).size;
 				carWindow = name;
+				carWin = w;
 			}
 		}
 	}
 	ttxCarWindows = [NSString stringWithFormat:@"active=%d | %@", ttxAppActive, [sizes componentsJoinedByString:@", "]];
 	if (CGSizeEqualToSize(target, ttxCarScreen)) {
 		// Lop ve video cua video dang hien: dat lai moi lan (TikTok co the doi lai khi doi video)
-		if (target.width > 0) TTXApplyCarVideo(ttxCurrentPlayer);
+		if (carWin) TTXApplyCarVideo(ttxCurrentPlayer, carWin);
 		return;
 	}
 	if (target.width < 1 && (ttxCarActive || ttxCarViews.count || ttxCarLayers.count)) TTXRestoreCarVideo(ttxCurrentPlayer);
@@ -1572,12 +1620,12 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.43 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.44 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
-	[lines addObject:[NSString stringWithFormat:@"Car: %@ | cua so: %@ | video: %@", ttxCarInfo, ttxCarWindows, ttxCarVideoInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Car: %@ | cua so: %@ | video (%@): %@", ttxCarInfo, ttxCarWindows, ttxCarVideoSource, ttxCarVideoInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
