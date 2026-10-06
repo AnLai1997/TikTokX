@@ -753,35 +753,36 @@ static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
 	%orig;
 	TTXFitCarWindow(self);
 }
-
-- (void)didAddSubview:(UIView *)subview {
-	%orig;
-	// Man hinh trinh bay (binh luan, chia se...) them lop moi vao cua so
-	__weak UIWindow *weakSelf = self;
-	dispatch_async(dispatch_get_main_queue(), ^{
-		TTXFitCarWindow(weakSelf);
-	});
-}
 %end
 
 #pragma mark - Car screen
 
 // CarBridge mo TikTok tren man hinh xe (rong, thap). TikTok chi lam giao dien cho dien thoai
-// nen bi vo bo cuc. Khi cua so khac kich thuoc man hinh dien thoai: cho cac view goc cua cua
-// so (view cua root view controller, lop chua man hinh trinh bay) bo cuc dung kich thuoc
-// iPhone dung, roi thu nho cho vua chieu cao man hinh xe va dat giua - nhu phan chieu man
-// hinh iPhone. Quay ve dien thoai thi tra lai.
+// nen bi vo bo cuc. Khi scene / man hinh khac kich thuoc dien thoai: cho ca cua so kich thuoc
+// iPhone dung, thu nho vua man hinh xe va dat giua - nhu phan chieu man hinh iPhone. Quay ve
+// dien thoai thi tra lai.
 static NSString *ttxCarInfo = @"-";
 static NSString *ttxCarWindows = @"-";
-static const void *kTTXCarScaled = &kTTXCarScaled;
+
+static BOOL TTXIsPhoneSize(CGSize s) {
+	CGSize m = [UIScreen mainScreen].bounds.size;
+	return (fabs(s.width - m.width) < 2 && fabs(s.height - m.height) < 2)
+		|| (fabs(s.width - m.height) < 2 && fabs(s.height - m.width) < 2);
+}
+
+// Vung cua so duoc phep chiem: khung cua scene (man hinh xe), khong phai bounds cua cua so
+// vi cua so da bi doi thanh kich thuoc iPhone
+static CGRect TTXWindowArea(UIWindow *window) {
+	CGRect area = window.windowScene.coordinateSpace.bounds;
+	BOOL otherScreen = window.screen && window.screen != [UIScreen mainScreen];
+	if (area.size.width < 1 || area.size.height < 1 || (otherScreen && TTXIsPhoneSize(area.size))) area = window.screen.bounds;
+	return area;
+}
 
 static BOOL TTXIsCarWindow(UIWindow *window) {
 	if (!window) return NO;
 	if (window.screen && window.screen != [UIScreen mainScreen]) return YES;
-	CGSize w = window.bounds.size, m = [UIScreen mainScreen].bounds.size;
-	BOOL same = (fabs(w.width - m.width) < 2 && fabs(w.height - m.height) < 2)
-		|| (fabs(w.width - m.height) < 2 && fabs(w.height - m.width) < 2);
-	return !same;
+	return !TTXIsPhoneSize(TTXWindowArea(window).size);
 }
 
 // Kich thuoc iPhone dung
@@ -790,39 +791,38 @@ static CGSize TTXPhoneSize(void) {
 	return CGSizeMake(MIN(m.width, m.height), MAX(m.width, m.height));
 }
 
-// Chay tren main thread
+static const void *kTTXCarScaled = &kTTXCarScaled;
+
+// Ca cua so lay kich thuoc iPhone dung (TikTok bo cuc nhu tren iPhone), roi thu nho cho vua
+// man hinh xe va dat giua. Chay tren main thread.
 static void TTXFitCarWindow(UIWindow *window) {
 	if (!window) return;
 	// Cua so ban phim cua he thong: de nguyen
 	NSString *name = NSStringFromClass([window class]);
 	if ([name containsString:@"Keyboard"] || [name containsString:@"TextEffects"]) return;
-	BOOL car = TTXIsCarWindow(window);
-	CGSize phone = TTXPhoneSize();
-	CGRect wb = window.bounds;
-	CGFloat scale = MIN(wb.size.width / phone.width, wb.size.height / phone.height);
-	CGPoint center = CGPointMake(CGRectGetMidX(wb), CGRectGetMidY(wb));
-	for (UIView *view in window.subviews) {
-		BOOL scaled = objc_getAssociatedObject(view, kTTXCarScaled) != nil;
-		if (car) {
-			CGAffineTransform t = CGAffineTransformMakeScale(scale, scale);
-			if (scaled && CGAffineTransformEqualToTransform(view.transform, t)
-				&& CGSizeEqualToSize(view.bounds.size, phone) && CGPointEqualToPoint(view.center, center)) continue;
-			objc_setAssociatedObject(view, kTTXCarScaled, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			view.transform = CGAffineTransformIdentity;
-			view.bounds = CGRectMake(0, 0, phone.width, phone.height);
-			view.center = center;
-			view.transform = t;
-			ttxCarInfo = [NSString stringWithFormat:@"cua so %@ -> iPhone %@ x%.2f (%@)", NSStringFromCGSize(wb.size),
-				NSStringFromCGSize(phone), scale, NSStringFromClass([view class])];
-			NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
-		} else if (scaled) {
-			objc_setAssociatedObject(view, kTTXCarScaled, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			view.transform = CGAffineTransformIdentity;
-			view.frame = wb;
-			[view setNeedsLayout];
-			ttxCarInfo = [NSString stringWithFormat:@"ve dien thoai, tra lai %@", NSStringFromClass([view class])];
-			NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
-		}
+	BOOL scaled = objc_getAssociatedObject(window, kTTXCarScaled) != nil;
+	CGRect area = TTXWindowArea(window);
+	if (TTXIsCarWindow(window)) {
+		CGSize phone = TTXPhoneSize();
+		CGFloat scale = MIN(area.size.width / phone.width, area.size.height / phone.height);
+		CGAffineTransform t = CGAffineTransformMakeScale(scale, scale);
+		CGPoint center = CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area));
+		if (scaled && CGAffineTransformEqualToTransform(window.transform, t) && CGSizeEqualToSize(window.bounds.size, phone)
+			&& fabs(window.center.x - center.x) < 1 && fabs(window.center.y - center.y) < 1) return;
+		objc_setAssociatedObject(window, kTTXCarScaled, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		window.transform = CGAffineTransformIdentity;
+		window.bounds = CGRectMake(0, 0, phone.width, phone.height);
+		window.center = center;
+		window.transform = t;
+		ttxCarInfo = [NSString stringWithFormat:@"%@ vung %@ -> iPhone %@ x%.2f, khung %@", name, NSStringFromCGRect(area),
+			NSStringFromCGSize(phone), scale, NSStringFromCGRect(window.frame)];
+		NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
+	} else if (scaled) {
+		objc_setAssociatedObject(window, kTTXCarScaled, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		window.transform = CGAffineTransformIdentity;
+		window.frame = area;
+		ttxCarInfo = [NSString stringWithFormat:@"%@ ve dien thoai, khung %@", name, NSStringFromCGRect(area)];
+		NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
 	}
 }
 
@@ -834,7 +834,8 @@ static void TTXCarTick(void) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
 		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
 			TTXFitCarWindow(w);
-			if (!w.hidden) [sizes addObject:[NSString stringWithFormat:@"%@%@", NSStringFromCGSize(w.bounds.size), TTXIsCarWindow(w) ? @" xe" : @""]];
+			if (!w.hidden) [sizes addObject:[NSString stringWithFormat:@"%@ %@%@", NSStringFromClass([w class]),
+				NSStringFromCGRect(w.frame), TTXIsCarWindow(w) ? @" xe" : @""]];
 		}
 	}
 	ttxCarWindows = [NSString stringWithFormat:@"active=%d | %@", ttxAppActive, [sizes componentsJoinedByString:@", "]];
@@ -1234,7 +1235,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.40 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.41 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
