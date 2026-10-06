@@ -127,14 +127,14 @@ static void TTXScheduleCarFit(id player);
 
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
-	if (ttxAppActive) {
-		if (sel == ttxDisplaySel) {
-			ttxCurrentPlayer = obj;
-			TTXScheduleClearDisplay(obj);
-			TTXScheduleCarFit(obj);
-		}
-		return NO;
+	// Tren man hinh xe (CarBridge) app co the khong "active" (dien thoai dang o man hinh khac)
+	// nhung video van hien: van ghi nho player dang hien de keo full man hinh xe
+	if (sel == ttxDisplaySel) {
+		ttxCurrentPlayer = obj;
+		TTXScheduleCarFit(obj);
+		if (ttxAppActive) TTXScheduleClearDisplay(obj);
 	}
+	if (ttxAppActive) return NO;
 	NSString *key = [NSString stringWithFormat:@"%@ -%@", NSStringFromClass(object_getClass(obj)), NSStringFromSelector(sel)];
 	@synchronized (ttxPauseCalls) {
 		[ttxPauseCalls addObject:key];
@@ -429,10 +429,8 @@ static void TTXHookLoop(NSString *className) {
 	__block void (*orig)(id, SEL, id) = NULL;
 	IMP repl = imp_implementationWithBlock(^(id obj, id arg) {
 		TTXCount(ttxLoopCalls, obj);
-		if (ttxAppActive) {
-			TTXScheduleClearDisplay(obj);
-			TTXScheduleCarFit(obj);
-		}
+		if (ttxAppActive) TTXScheduleClearDisplay(obj);
+		TTXScheduleCarFit(obj);
 		// O nen TikTok co the tu cuon (isAutoPlayEnabled): de no lam truoc, chi cuon neu feed dung yen
 		if (ttxAutoNext && !ttxAppActive) {
 			orig(obj, sel, arg);
@@ -989,9 +987,28 @@ static void TTXApplyCarFit(id player) {
 
 // Kiem tra cua so dang o man hinh xe hay dien thoai: o xe thi keo / phong to, vua quay ve
 // dien thoai thi tra lai. Chay moi giay de bat duoc luc chuyen man hinh giua chung.
+static NSString *ttxCarWindows = @"-";
+
+// Khong doi ttxAppActive: mo tren dien thoai truoc roi chuyen len xe thi app thuong o trang thai
+// khong active (dien thoai sang man hinh khac) du video van hien tren xe.
 static void TTXCarTick(id player) {
-	if (!ttxAppActive) return;
 	UIWindow *window = TTXPlayerView(player).window;
+	// Ghi lai cac cua so cua app de biet player co nam o cua so man hinh xe khong
+	NSMutableArray *sizes = [NSMutableArray array];
+	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+			if (w.hidden) continue;
+			[sizes addObject:[NSString stringWithFormat:@"%@%@%@", NSStringFromCGSize(w.bounds.size),
+				TTXIsCarWindow(w) ? @" xe" : @"", w == window ? @" (player)" : @""]];
+		}
+	}
+	ttxCarWindows = [NSString stringWithFormat:@"active=%d | %@", ttxAppActive, [sizes componentsJoinedByString:@", "]];
+	static NSString *lastWindows;
+	if (![ttxCarWindows isEqualToString:lastWindows]) {
+		lastWindows = ttxCarWindows;
+		NSLog(@"[TikTokX] Car cua so: %@", ttxCarWindows);
+	}
 	if (!window) return;
 	if (TTXIsCarWindow(window)) TTXApplyCarFit(player);
 	else if (ttxCarActive || ttxCarViews.count || ttxCarLayers.count) TTXRestoreCar(player);
@@ -1401,12 +1418,12 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.36 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.37 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d carZoom=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay, ttxCarZoom]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
-	[lines addObject:[NSString stringWithFormat:@"Car: %@", ttxCarInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Car: %@ | cua so: %@", ttxCarInfo, ttxCarWindows]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
