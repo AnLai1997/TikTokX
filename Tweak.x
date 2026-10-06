@@ -1053,13 +1053,33 @@ static void TTXRestoreCarVideo(id player) {
 	TTXLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
 }
 
-// Mo ta cac view con cua player (lan dau gap moi class player) de biet lop nao ve video
+// Mo ta 1 layer: class, khung, gravity, transform, contentsRect, drawableSize (Metal)
+static NSString *TTXDescribeLayer(CALayer *layer) {
+	NSMutableString *s = [NSMutableString stringWithFormat:@"%@ %@ g=%@", NSStringFromClass([layer class]), NSStringFromCGRect(layer.frame), layer.contentsGravity];
+	if (!CATransform3DIsIdentity(layer.transform)) [s appendString:@" (transform)"];
+	if (!CGRectEqualToRect(layer.contentsRect, CGRectMake(0, 0, 1, 1))) [s appendFormat:@" cr=%@", NSStringFromCGRect(layer.contentsRect)];
+	if ([layer isKindOfClass:[AVPlayerLayer class]]) [s appendFormat:@" vg=%@ video=%@", ((AVPlayerLayer *)layer).videoGravity, NSStringFromCGRect(((AVPlayerLayer *)layer).videoRect)];
+	SEL drawable = NSSelectorFromString(@"drawableSize");
+	Method m = class_getInstanceMethod([layer class], drawable);
+	const char *type = m ? method_getTypeEncoding(m) : NULL;
+	if (type && strncmp(type, "{CGSize", 7) == 0) {
+		[s appendFormat:@" drawable=%@", NSStringFromCGSize(((CGSize (*)(id, SEL))objc_msgSend)(layer, drawable))];
+	}
+	return s;
+}
+
+// Mo ta cac view con cua player (va layer rieng khong thuoc view con) de biet lop nao ve video
 static NSString *TTXDescribeSubviews(UIView *view, int depth) {
 	NSMutableArray *parts = [NSMutableArray array];
+	NSString *pad = [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0];
+	for (CALayer *layer in view.layer.sublayers) {
+		if ([layer.delegate isKindOfClass:[UIView class]]) continue;
+		[parts addObject:[NSString stringWithFormat:@"%@[layer] %@", pad, TTXDescribeLayer(layer)]];
+	}
 	for (UIView *sub in view.subviews) {
-		[parts addObject:[NSString stringWithFormat:@"%@%@ %@ layer=%@", [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0],
-			NSStringFromClass([sub class]), NSStringFromCGRect(sub.frame), NSStringFromClass([sub.layer class])]];
-		if (depth < 2 && sub.subviews.count) [parts addObject:TTXDescribeSubviews(sub, depth + 1)];
+		[parts addObject:[NSString stringWithFormat:@"%@%@ %@%@%@ layer=%@", pad, NSStringFromClass([sub class]), NSStringFromCGRect(sub.frame),
+			sub.hidden ? @" an" : @"", CGAffineTransformIsIdentity(sub.transform) ? @"" : @" (transform)", TTXDescribeLayer(sub.layer)]];
+		if (depth < 3 && (sub.subviews.count || sub.layer.sublayers.count)) [parts addObject:TTXDescribeSubviews(sub, depth + 1)];
 	}
 	return [parts componentsJoinedByString:@"\n"];
 }
@@ -1145,6 +1165,16 @@ static void TTXLogCarVideoChain(UIView *view) {
 	}
 	TTXLog(@"[TikTokX] Car video nguon: %@ | %@\nchuoi: %@\ncon:\n%@", ttxCarVideoSource, ttxCarVideoInfo,
 		[parts componentsJoinedByString:@" < "], TTXDescribeSubviews(view, 0));
+	// Chup lai sau khi video bat dau phat (video bi nhay lech sau khi da can giua)
+	__weak UIView *weakView = view;
+	for (NSNumber *delay in @[@3, @8]) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			UIView *v = weakView;
+			if (!v) return;
+			TTXLog(@"[TikTokX] Car video sau %@s: %@ trong cua so %@ | %@\ncon:\n%@", delay, NSStringFromClass([v class]),
+				NSStringFromCGRect([v convertRect:v.bounds toView:nil]), ttxCarVideoInfo, TTXDescribeSubviews(v, 0));
+		});
+	}
 }
 
 static void TTXApplyCarVideo(id player, UIWindow *carWindow) {
@@ -1703,7 +1733,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.45 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.46 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
