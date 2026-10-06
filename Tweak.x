@@ -700,8 +700,10 @@ static NSHashTable *ttxEngines;
 static NSString *ttxEngineInfo = @"-";
 static const NSInteger kTTXScaleAspectFit = 1; // TTVideoEngineScalingModeAspectFit
 static const void *kTTXEngineMode = &kTTXEngineMode; // scaleMode TikTok muon dat
-// Phong to toi da cho video doc: 1.6 = con thay khoang 62% chieu cao video
-static const CGFloat kTTXCarZoomMax = 1.6;
+// Phong to toi da cho video doc: 1.3 = con thay khoang 77% chieu cao video. Khong biet kich
+// thuoc video (co the la video ngang) thi chi phong to nhe de khong che mat hinh.
+static const CGFloat kTTXCarZoomMax = 1.3;
+static const CGFloat kTTXCarZoomUnknown = 1.1;
 
 static BOOL TTXIsCarWindow(UIWindow *window) {
 	if (!window) return NO;
@@ -887,11 +889,15 @@ static CGRect TTXVideoRect(id player, CGRect bounds, CGFloat *zoomOut) {
 	*zoomOut = 1;
 	if (!ttxCarZoom || bounds.size.width < 1 || bounds.size.height < 1) return bounds;
 	CGSize video = TTXVideoSize(player);
-	if (video.width < 1) video = CGSizeMake(9, 16);
+	CGFloat maxZoom = kTTXCarZoomMax;
+	if (video.width < 1) {
+		video = CGSizeMake(9, 16);
+		maxZoom = kTTXCarZoomUnknown;
+	}
 	if (video.width >= video.height) return bounds; // video ngang / vuong: hien tron
 	CGFloat fit = MIN(bounds.size.width / video.width, bounds.size.height / video.height);
 	CGFloat fill = MAX(bounds.size.width / video.width, bounds.size.height / video.height);
-	CGFloat zoom = MIN(fill / fit, kTTXCarZoomMax);
+	CGFloat zoom = MIN(fill / fit, maxZoom);
 	*zoomOut = zoom;
 	return CGRectInset(bounds, -bounds.size.width * (zoom - 1) / 2, -bounds.size.height * (zoom - 1) / 2);
 }
@@ -1418,7 +1424,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.37 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.38 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d carZoom=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay, ttxCarZoom]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
