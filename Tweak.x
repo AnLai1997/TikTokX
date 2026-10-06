@@ -742,6 +742,25 @@ static void TTXApplyCarFit(id player) {
 	CGRect oldFrame = [playerView convertRect:playerView.bounds toView:window];
 	CGFloat oldArea = playerView.bounds.size.width * playerView.bounds.size.height;
 	NSUInteger changed = 0;
+	CGRect oldPage = [page convertRect:page.bounds toView:window];
+	// O feed (va cac view chua no, vd. trang cua tab tren cung) van rong bang man hinh dien
+	// thoai: keo ngang cho bang view cha. Trong scroll view giu x va chi keo trang dang hien.
+	NSMutableArray *outer = [NSMutableArray array];
+	for (UIView *v = page; v.superview && v.superview != window; v = v.superview) [outer insertObject:v atIndex:0];
+	for (UIView *v in outer) {
+		UIView *parent = v.superview;
+		CGFloat w = parent.bounds.size.width;
+		CGRect f = v.frame;
+		if (f.size.width >= w - 2 || f.size.width < w * 0.2) continue; // da du rong / view phu nho
+		CGFloat x = 0;
+		if ([parent isKindOfClass:[UIScrollView class]]) {
+			x = f.origin.x;
+			if (fabs(((UIScrollView *)parent).contentOffset.x - x) > 2) continue;
+		}
+		v.transform = CGAffineTransformIdentity;
+		v.frame = CGRectMake(x, f.origin.y, w, f.size.height);
+		changed++;
+	}
 	NSMutableArray *chain = [NSMutableArray array];
 	for (UIView *v = playerView; v && v != page; v = v.superview) [chain insertObject:v atIndex:0];
 	// Tu ngoai vao trong de moi view lay bounds moi cua view cha
@@ -750,9 +769,9 @@ static void TTXApplyCarFit(id player) {
 	}
 	if (oldArea > 0) changed += TTXFillRenderViews(playerView, oldArea, 0);
 
-	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ | player %@ %@ -> %@ | sua %lu",
+	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ -> %@ | player %@ %@ -> %@ | sua %lu",
 		NSStringFromCGSize(window.bounds.size), NSStringFromCGSize([UIScreen mainScreen].bounds.size),
-		NSStringFromClass([page class]), NSStringFromCGRect([page convertRect:page.bounds toView:window]),
+		NSStringFromClass([page class]), NSStringFromCGRect(oldPage), NSStringFromCGRect([page convertRect:page.bounds toView:window]),
 		NSStringFromClass([playerView class]), NSStringFromCGRect(oldFrame),
 		NSStringFromCGRect([playerView convertRect:playerView.bounds toView:window]), (unsigned long)changed];
 	if (changed) NSLog(@"[TikTokX] Car: %@", info);
@@ -1155,7 +1174,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.33 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.34 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
