@@ -709,23 +709,87 @@ static BOOL TTXFillSuperview(UIView *view) {
 	return YES;
 }
 
+// Video tren man hinh xe: hien tron khung hinh (aspect fit) thay vi phong to cat bot (aspect
+// fill) nhu tren dien thoai, vi man hinh xe rat rong nen phong to se mat phan lon noi dung.
+static BOOL ttxCarActive;
+static NSHashTable *ttxEngines;
+static NSString *ttxEngineInfo = @"-";
+static const NSInteger kTTXScaleAspectFit = 1; // TTVideoEngineScalingModeAspectFit
+
+static void TTXAspectFitView(UIView *view) {
+	if (view.contentMode != UIViewContentModeScaleAspectFit) view.contentMode = UIViewContentModeScaleAspectFit;
+	if (![view.layer.contentsGravity isEqualToString:kCAGravityResizeAspect]) view.layer.contentsGravity = kCAGravityResizeAspect;
+}
+
+static void TTXAspectFitLayer(CALayer *layer) {
+	if ([layer isKindOfClass:[AVPlayerLayer class]]) ((AVPlayerLayer *)layer).videoGravity = AVLayerVideoGravityResizeAspect;
+	else if (![layer.contentsGravity isEqualToString:kCAGravityResizeAspect]) layer.contentsGravity = kCAGravityResizeAspect;
+}
+
 // Lop ve video ben trong player: view / layer truoc do phu phan lon player
 static NSUInteger TTXFillRenderViews(UIView *view, CGFloat oldArea, int depth) {
 	NSUInteger changed = 0;
 	for (UIView *sub in view.subviews) {
 		if (sub.hidden || sub.bounds.size.width * sub.bounds.size.height < oldArea * 0.5) continue;
 		if (TTXFillSuperview(sub)) changed++;
+		TTXAspectFitView(sub);
 		if (depth < 3) changed += TTXFillRenderViews(sub, oldArea, depth + 1);
 	}
 	for (CALayer *layer in view.layer.sublayers) {
 		if ([layer.delegate isKindOfClass:[UIView class]]) continue; // layer cua subview, da xu ly
 		if (layer.bounds.size.width * layer.bounds.size.height < oldArea * 0.5) continue;
+		TTXAspectFitLayer(layer);
 		if (CGRectEqualToRect(CGRectIntegral(layer.frame), CGRectIntegral(view.layer.bounds))) continue;
 		layer.frame = view.layer.bounds;
-		if ([layer isKindOfClass:[AVPlayerLayer class]]) ((AVPlayerLayer *)layer).videoGravity = AVLayerVideoGravityResizeAspect;
 		changed++;
 	}
 	return changed;
+}
+
+// TTVideoEngine tu scale hinh theo scaleMode. Ghi nho engine khi TikTok dat scaleMode va ep
+// aspect fit khi dang o man hinh xe.
+static void (*ttxOrigSetScaleMode)(id, SEL, NSInteger);
+static void TTXSetScaleMode(id self, SEL _cmd, NSInteger mode) {
+	@synchronized (ttxEngines) {
+		[ttxEngines addObject:self];
+	}
+	ttxOrigSetScaleMode(self, _cmd, ttxCarActive ? kTTXScaleAspectFit : mode);
+}
+
+static void TTXHookScaleMode(void) {
+	Class cls = NSClassFromString(@"TTVideoEngine");
+	SEL sel = NSSelectorFromString(@"setScaleMode:");
+	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
+	if (!method || method_getNumberOfArguments(method) != 3) {
+		ttxEngineInfo = @"khong co -[TTVideoEngine setScaleMode:]";
+		return;
+	}
+	MSHookMessageEx(cls, sel, (IMP)TTXSetScaleMode, (IMP *)&ttxOrigSetScaleMode);
+}
+
+// Engine cua player dang hien (neu lay duoc qua property) + moi engine da thay
+static void TTXApplyCarScaleMode(id player) {
+	NSMutableSet *engines = [NSMutableSet set];
+	@synchronized (ttxEngines) {
+		[engines addObjectsFromArray:ttxEngines.allObjects];
+	}
+	for (NSString *name in @[@"videoEngine", @"engine", @"ttVideoEngine", @"playerEngine", @"player"]) {
+		SEL sel = NSSelectorFromString(name);
+		if (![player respondsToSelector:sel]) continue;
+		id obj = ((id (*)(id, SEL))objc_msgSend)(player, sel);
+		if ([obj respondsToSelector:NSSelectorFromString(@"setScaleMode:")]) [engines addObject:obj];
+	}
+	NSUInteger set = 0;
+	SEL getter = NSSelectorFromString(@"scaleMode");
+	for (id engine in engines) {
+		if (![engine respondsToSelector:getter] || ![engine respondsToSelector:NSSelectorFromString(@"setScaleMode:")]) continue;
+		if (((NSInteger (*)(id, SEL))objc_msgSend)(engine, getter) == kTTXScaleAspectFit) continue;
+		((void (*)(id, SEL, NSInteger))objc_msgSend)(engine, NSSelectorFromString(@"setScaleMode:"), kTTXScaleAspectFit);
+		set++;
+	}
+	if (ttxOrigSetScaleMode || engines.count) {
+		ttxEngineInfo = [NSString stringWithFormat:@"engine %lu, doi sang fit %lu", (unsigned long)engines.count, (unsigned long)set];
+	}
 }
 
 // Chay tren main thread
@@ -768,12 +832,14 @@ static void TTXApplyCarFit(id player) {
 		if (TTXFillSuperview(v)) changed++;
 	}
 	if (oldArea > 0) changed += TTXFillRenderViews(playerView, oldArea, 0);
+	ttxCarActive = YES;
+	TTXApplyCarScaleMode(player);
 
-	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ -> %@ | player %@ %@ -> %@ | sua %lu",
+	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ -> %@ | player %@ %@ -> %@ | sua %lu | %@",
 		NSStringFromCGSize(window.bounds.size), NSStringFromCGSize([UIScreen mainScreen].bounds.size),
 		NSStringFromClass([page class]), NSStringFromCGRect(oldPage), NSStringFromCGRect([page convertRect:page.bounds toView:window]),
 		NSStringFromClass([playerView class]), NSStringFromCGRect(oldFrame),
-		NSStringFromCGRect([playerView convertRect:playerView.bounds toView:window]), (unsigned long)changed];
+		NSStringFromCGRect([playerView convertRect:playerView.bounds toView:window]), (unsigned long)changed, ttxEngineInfo];
 	if (changed) NSLog(@"[TikTokX] Car: %@", info);
 	ttxCarInfo = info;
 
@@ -1174,7 +1240,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.34 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.35 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1202,6 +1268,7 @@ static void TTXLogDiagnostics(void) {
 	ttxRemoteWrapped = [NSCountedSet set];
 	ttxClearedViews = [NSHashTable weakObjectsHashTable];
 	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
+	ttxEngines = [NSHashTable weakObjectsHashTable];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
@@ -1236,6 +1303,7 @@ static void TTXLogDiagnostics(void) {
 
 	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
+	TTXHookScaleMode();
 
 	ttxDisplaySel = NSSelectorFromString(@"containerDidFullyDisplayWithReason:");
 	ttxBoolHooks = [NSMutableArray array];
