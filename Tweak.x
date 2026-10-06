@@ -4,6 +4,41 @@
 #import <mach-o/dyld.h>
 #import <substrate.h>
 #import <notify.h>
+#import <dlfcn.h>
+#import <mach-o/loader.h>
+
+// Ghi log vao syslog va file Documents/TikTokX.txt trong thu muc cua TikTok (mo bang Filza:
+// Apps Manager > TikTok > Data > Documents) de nguoi dung gui lai khi khong xem duoc syslog
+static void TTXLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static void TTXLog(NSString *format, ...) {
+	va_list args;
+	va_start(args, format);
+	NSString *line = [[NSString alloc] initWithFormat:format arguments:args];
+	va_end(args);
+	NSLog(@"%@", line);
+	static NSString *path;
+	static dispatch_queue_t queue;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		path = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject stringByAppendingPathComponent:@"TikTokX.txt"];
+		queue = dispatch_queue_create("com.tiktokx.log", DISPATCH_QUEUE_SERIAL);
+		// Moi lan mo app ghi lai tu dau
+		[[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+	});
+	NSDateFormatter *formatter = [NSDateFormatter new];
+	formatter.dateFormat = @"HH:mm:ss";
+	NSString *entry = [NSString stringWithFormat:@"%@ %@\n", [formatter stringFromDate:[NSDate date]], line];
+	dispatch_async(queue, ^{
+		NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
+		if (!file) {
+			[entry writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+			return;
+		}
+		if ([file seekToEndOfFile] > 1024 * 1024) return;
+		[file writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+		[file closeFile];
+	});
+}
 
 static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
@@ -73,7 +108,7 @@ static void TTXLoadPrefs(void) {
 		ttxClearDisplay = TTXReadBool(kTTXClearDisplay, kTTXDefaultClearDisplay, prefs);
 		source = @"plist";
 	}
-	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
+	TTXLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
 }
 
 static void TTXSetupRemoteCommands(void);
@@ -731,11 +766,11 @@ static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
 	ttxTapSeen++;
 	UIView *page = ttxClearPage;
 	if (!page.window || page.window != touch.window) {
-		NSLog(@"[TikTokX] cham: khong co o video (%@)", page ? NSStringFromClass([page class]) : @"nil");
+		TTXLog(@"[TikTokX] cham: khong co o video (%@)", page ? NSStringFromClass([page class]) : @"nil");
 		return;
 	}
 	if (!CGRectContainsPoint([page convertRect:page.bounds toView:nil], p)) {
-		NSLog(@"[TikTokX] cham ngoai o video");
+		TTXLog(@"[TikTokX] cham ngoai o video");
 		return;
 	}
 	ttxTapReveal++;
@@ -1015,7 +1050,7 @@ static void TTXRestoreCarVideo(id player) {
 	[ttxCarLayers removeAllObjects];
 	TTXSetEnginesFit(player, NO);
 	ttxCarVideoInfo = [NSString stringWithFormat:@"ve dien thoai, tra lai %lu | %@", (unsigned long)count, ttxEngineInfo];
-	NSLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
+	TTXLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
 }
 
 // Mo ta cac view con cua player (lan dau gap moi class player) de biet lop nao ve video
@@ -1042,7 +1077,7 @@ static void TTXApplyCarVideoView(UIView *playerView, id player) {
 	if (!described) described = [NSMutableSet set];
 	if (![described containsObject:NSStringFromClass([playerView class])]) {
 		[described addObject:NSStringFromClass([playerView class])];
-		NSLog(@"[TikTokX] Car video: %@ %@ trong o %@:\n%@", NSStringFromClass([playerView class]), NSStringFromCGRect(playerView.frame),
+		TTXLog(@"[TikTokX] Car video: %@ %@ trong o %@:\n%@", NSStringFromClass([playerView class]), NSStringFromCGRect(playerView.frame),
 			NSStringFromCGRect(page.bounds), TTXDescribeSubviews(playerView, 0));
 	}
 	CGRect oldFrame = [playerView convertRect:playerView.bounds toView:page];
@@ -1073,7 +1108,7 @@ static void TTXApplyCarVideoView(UIView *playerView, id player) {
 		NSStringFromClass([page class]), NSStringFromCGRect(page.bounds), NSStringFromClass([playerView class]),
 		NSStringFromCGRect(oldFrame), NSStringFromCGRect([playerView convertRect:playerView.bounds toView:page]), NSStringFromCGRect(area), zoom,
 		ttxVideoSizeSource, (unsigned long)changed, ttxEngineInfo];
-	if (changed) NSLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
+	if (changed) TTXLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
 }
 
 // Lop ve video (theo loai layer / ten class) nam trong o feed chua diem giua man hinh
@@ -1098,6 +1133,20 @@ static UIView *TTXFindCenterRenderView(UIView *view, CGPoint center, int depth) 
 // dung player khac khong qua hook) thi tim lop ve video o giua man hinh va dung view chua no.
 static NSString *ttxCarVideoSource = @"-";
 
+// Ghi chuoi view tu video len cua so (khung trong cua so) va cac view con, moi khi doi nguon video
+static void TTXLogCarVideoChain(UIView *view) {
+	static NSString *last;
+	if ([ttxCarVideoSource isEqualToString:last]) return;
+	last = ttxCarVideoSource;
+	NSMutableArray *parts = [NSMutableArray array];
+	for (UIView *v = view; v; v = v.superview) {
+		[parts addObject:[NSString stringWithFormat:@"%@ %@%@", NSStringFromClass([v class]), NSStringFromCGRect([v convertRect:v.bounds toView:nil]),
+			CGAffineTransformIsIdentity(v.transform) ? @"" : @" (transform)"]];
+	}
+	TTXLog(@"[TikTokX] Car video nguon: %@ | %@\nchuoi: %@\ncon:\n%@", ttxCarVideoSource, ttxCarVideoInfo,
+		[parts componentsJoinedByString:@" < "], TTXDescribeSubviews(view, 0));
+}
+
 static void TTXApplyCarVideo(id player, UIWindow *carWindow) {
 	CGPoint center = CGPointMake(CGRectGetMidX(carWindow.bounds), CGRectGetMidY(carWindow.bounds));
 	UIView *playerView = TTXPlayerView(player);
@@ -1105,6 +1154,7 @@ static void TTXApplyCarVideo(id player, UIWindow *carWindow) {
 	if (page && CGRectContainsPoint([page convertRect:page.bounds toView:nil], center)) {
 		ttxCarVideoSource = NSStringFromClass([player class]);
 		TTXApplyCarVideoView(playerView, player);
+		TTXLogCarVideoChain(playerView);
 		return;
 	}
 	UIView *render = TTXFindCenterRenderView(carWindow, center, 0);
@@ -1115,6 +1165,7 @@ static void TTXApplyCarVideo(id player, UIWindow *carWindow) {
 	UIView *container = render.superview;
 	ttxCarVideoSource = [NSString stringWithFormat:@"tim theo lop ve %@ trong %@", NSStringFromClass([render class]), NSStringFromClass([container class])];
 	TTXApplyCarVideoView(container, nil);
+	TTXLogCarVideoChain(container);
 }
 
 #pragma mark - Car screen
@@ -1163,10 +1214,34 @@ static BOOL TTXIsCarWindow(UIWindow *window) {
 // TikTok tinh nhieu khung theo [UIScreen mainScreen].bounds (kich thuoc iPhone) nen tren man
 // hinh xe bo cuc bi vo. O man hinh xe: bao mainScreen co kich thuoc dung bang khung CarPlay
 // de TikTok bo cuc vua khung xe nhu tren mot may co man hinh do.
+// Chi bao kich thuoc xe cho code cua TikTok: UIKit (ban phim, cua so he thong...) van thay kich
+// thuoc that, neu khong ban phim bi tinh sai va hien khong du.
+static uintptr_t ttxUIKitStart, ttxUIKitEnd;
+
+static void TTXFindUIKitRange(void) {
+	Dl_info info;
+	if (!dladdr((const void *)class_getMethodImplementation([UIView class], @selector(layoutSubviews)), &info) || !info.dli_fbase) return;
+	const struct mach_header_64 *header = (const struct mach_header_64 *)info.dli_fbase;
+	const struct load_command *cmd = (const struct load_command *)(header + 1);
+	for (uint32_t i = 0; i < header->ncmds; i++) {
+		if (cmd->cmd == LC_SEGMENT_64) {
+			const struct segment_command_64 *seg = (const struct segment_command_64 *)cmd;
+			if (strcmp(seg->segname, "__TEXT") == 0) {
+				ttxUIKitStart = (uintptr_t)header;
+				ttxUIKitEnd = (uintptr_t)header + seg->vmsize;
+				return;
+			}
+		}
+		cmd = (const struct load_command *)((const char *)cmd + cmd->cmdsize);
+	}
+}
+
 %hook UIScreen
 - (CGRect)bounds {
 	CGRect r = %orig;
 	if (ttxScreenBypass || ttxCarScreen.width < 1 || self != [UIScreen mainScreen]) return r;
+	uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+	if (caller >= ttxUIKitStart && caller < ttxUIKitEnd) return r;
 	return CGRectMake(0, 0, ttxCarScreen.width, ttxCarScreen.height);
 }
 %end
@@ -1192,7 +1267,10 @@ static void TTXCarTick(void) {
 		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
 			// Cua so ban phim cua he thong: bo qua
 			NSString *name = NSStringFromClass([w class]);
-			if ([name containsString:@"Keyboard"] || [name containsString:@"TextEffects"]) continue;
+			if ([name containsString:@"Keyboard"] || [name containsString:@"TextEffects"]) {
+				if (!w.hidden) [sizes addObject:[NSString stringWithFormat:@"%@ %@", name, NSStringFromCGRect(w.frame)]];
+				continue;
+			}
 			// Ban 1.0.41 thu nho ca cua so: tra lai
 			if (!CGAffineTransformIsIdentity(w.transform)) {
 				w.transform = CGAffineTransformIdentity;
@@ -1209,6 +1287,11 @@ static void TTXCarTick(void) {
 		}
 	}
 	ttxCarWindows = [NSString stringWithFormat:@"active=%d | %@", ttxAppActive, [sizes componentsJoinedByString:@", "]];
+	static NSString *lastWindows;
+	if (![ttxCarWindows isEqualToString:lastWindows]) {
+		lastWindows = ttxCarWindows;
+		TTXLog(@"[TikTokX] Car cua so: %@", ttxCarWindows);
+	}
 	if (CGSizeEqualToSize(target, ttxCarScreen)) {
 		// Lop ve video cua video dang hien: dat lai moi lan (TikTok co the doi lai khi doi video)
 		if (carWin) TTXApplyCarVideo(ttxCurrentPlayer, carWin);
@@ -1219,7 +1302,7 @@ static void TTXCarTick(void) {
 	ttxCarInfo = target.width > 0
 		? [NSString stringWithFormat:@"man hinh xe %@ (%@)", NSStringFromCGSize(target), carWindow]
 		: [NSString stringWithFormat:@"ve dien thoai %@", NSStringFromCGSize(TTXRealScreenSize())];
-	NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
+	TTXLog(@"[TikTokX] Car: %@", ttxCarInfo);
 	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
 		for (UIWindow *w in ((UIWindowScene *)scene).windows) TTXRelayout(w, 0);
@@ -1620,7 +1703,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.44 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.45 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1636,12 +1719,12 @@ static NSString *TTXDiagnosticReport(void) {
 
 // Chi ghi vao syslog, khong hien popup
 static void TTXLogDiagnostics(void) {
-	NSLog(@"[TikTokX]\n%@", TTXDiagnosticReport());
+	TTXLog(@"[TikTokX]\n%@", TTXDiagnosticReport());
 }
 
 %ctor {
 	TTXLoadPrefs();
-	NSLog(@"[TikTokX] loaded in %@", [NSBundle mainBundle].bundleIdentifier);
+	TTXLog(@"[TikTokX] loaded in %@", [NSBundle mainBundle].bundleIdentifier);
 	ttxPauseCalls = [NSCountedSet set];
 	ttxPauseBlocked = [NSCountedSet set];
 	ttxLoopCalls = [NSCountedSet set];
@@ -1689,6 +1772,7 @@ static void TTXLogDiagnostics(void) {
 	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
 	TTXHookScaleMode();
+	TTXFindUIKitRange();
 
 	ttxDisplaySel = NSSelectorFromString(@"containerDidFullyDisplayWithReason:");
 	ttxBoolHooks = [NSMutableArray array];
