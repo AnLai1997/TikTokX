@@ -1,6 +1,6 @@
 Package: tiktokx
 Name: TikTokX
-Version: 1.0.41
+Version: 1.0.42
 Architecture: iphoneos-arm64
 Maintainer: AnLai
 Author: AnLai
@@ -19,7 +19,7 @@ Description: Background play, auto scroll and lock screen controls for TikTok
  - Clear Display: hide the buttons, caption and overlays on videos;
    tap the video to show them for 3 seconds.
  .
- On a car display (CarBridge) TikTok is shown at iPhone proportions, centered.
+ On a car display (CarBridge) TikTok is laid out to fit the CarPlay frame.
  .
  Settings are in English or Vietnamese. Requires Dopamine (rootless).
  License: MIT. Author: AnLai.
