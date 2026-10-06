@@ -10,13 +10,15 @@
 #endif
 
 // Bit trong state cua notification (TikTok bi sandbox nen khong doc duoc plist,
-// nhung doc duoc state nay). bit9 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
-// bit3 = doi nut tua thanh bai truoc / bai sau, bit4 = an giao dien phu tren video.
-#define kTTXStateValid       (1ULL << 9)
+// nhung doc duoc state nay). bit10 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
+// bit3 = doi nut tua thanh bai truoc / bai sau, bit4 = an giao dien phu tren video,
+// bit5 = phong to vua phai video doc tren man hinh xe.
+#define kTTXStateValid       (1ULL << 10)
 #define kTTXStateBackground  (1ULL << 1)
 #define kTTXStateAutoNext    (1ULL << 2)
 #define kTTXStateRemoteScroll (1ULL << 3)
 #define kTTXStateClearDisplay (1ULL << 4)
+#define kTTXStateCarZoom     (1ULL << 5)
 
 static id TTXPrefValue(CFStringRef key) {
 	CFPropertyListRef value = CFPreferencesCopyAppValue(key, kTTXSuite);
@@ -41,6 +43,7 @@ static void TTXPublishPrefs(void) {
 	if (TTXPrefBool(CFSTR("autoNext"))) state |= kTTXStateAutoNext;
 	if (TTXPrefBool(CFSTR("remoteScroll"))) state |= kTTXStateRemoteScroll;
 	if (TTXPrefBool(CFSTR("clearDisplay"))) state |= kTTXStateClearDisplay;
+	if (TTXPrefBool(CFSTR("carZoom"))) state |= kTTXStateCarZoom;
 
 	int token;
 	if (notify_register_check(kTTXPrefsChanged, &token) == NOTIFY_STATUS_OK) {
@@ -53,7 +56,7 @@ static void TTXPublishPrefs(void) {
 // Ban truoc 1.0.31 luu cai dat o com.anlai.tiktokx: chep sang ten moi neu chua co
 static void TTXMigrateOldPrefs(void) {
 	CFStringRef oldSuite = CFSTR("com.anlai.tiktokx");
-	for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay", kTTXLanguage]) {
+	for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay", @"carZoom", kTTXLanguage]) {
 		if (TTXPrefValue((__bridge CFStringRef)key)) continue;
 		CFPropertyListRef value = CFPreferencesCopyAppValue((__bridge CFStringRef)key, oldSuite);
 		if (!value) continue;
@@ -83,6 +86,8 @@ static NSString *TTXText(NSString *key) {
 				@"remoteScroll.info": @"Replace the ±15s buttons on the lock screen and Control Center with previous/next to scroll the feed.",
 				@"clearDisplay": @"Clear Display",
 				@"clearDisplay.info": @"Hide the buttons, caption and other overlays on top of videos. Tap the video to show them for 3 seconds.",
+				@"carZoom": @"Car Screen Zoom",
+				@"carZoom.info": @"On a car display (CarBridge), zoom portrait videos in a little so they fill more of the wide screen. Off: show the whole video.",
 				@"language": @"Language",
 				@"section.playback": @"Playback",
 				@"section.display": @"Controls & Display",
@@ -98,6 +103,8 @@ static NSString *TTXText(NSString *key) {
 				@"remoteScroll.info": @"Thay nút tua ±15s trên màn hình khóa và Control Center bằng nút bài trước/bài sau để cuộn feed.",
 				@"clearDisplay": @"Loại bỏ yếu tố trên màn hình",
 				@"clearDisplay.info": @"Ẩn các nút, chú thích và lớp giao diện khác phủ trên video. Chạm vào video để hiện lại trong 3 giây.",
+				@"carZoom": @"Phóng to trên màn hình xe",
+				@"carZoom.info": @"Trên màn hình xe (CarBridge), phóng to vừa phải video dọc để phủ nhiều hơn màn hình rộng. Tắt: hiện trọn video.",
 				@"language": @"Ngôn ngữ",
 				@"section.playback": @"Phát lại",
 				@"section.display": @"Điều khiển & hiển thị",
@@ -149,6 +156,7 @@ static UIImage *TTXIconForKey(NSString *key) {
 		@"autoNext": @[@"arrow.down", TTXDynamic(0x0A59F7, 0x317AF7)],
 		@"remoteScroll": @[@"forward.end.fill", TTXDynamic(0x7B4FF5, 0x8A63F7)],
 		@"clearDisplay": @[@"eye.slash.fill", TTXDynamic(0xFF7500, 0xFF8A26)],
+		@"carZoom": @[@"car.fill", TTXDynamic(0x00A86B, 0x1FBF84)],
 	};
 	return TTXIcon(icons[key][0], icons[key][1]);
 }
@@ -293,7 +301,7 @@ static UIImage *TTXIconForKey(NSString *key) {
 	[_content setCustomSpacing:28 afterView:_content.arrangedSubviews.lastObject];
 
 	[self addSection:@"section.playback" keys:@[@"backgroundAudio", @"autoNext"]];
-	[self addSection:@"section.display" keys:@[@"remoteScroll", @"clearDisplay"]];
+	[self addSection:@"section.display" keys:@[@"remoteScroll", @"clearDisplay", @"carZoom"]];
 
 	UILabel *about = [UILabel new];
 	about.text = [NSString stringWithFormat:TTXText(@"about"), @TTX_VERSION];
