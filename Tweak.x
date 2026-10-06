@@ -579,6 +579,72 @@ static NSUInteger ttxRevealToken;
 // O video dang che gan nhat, de nhan cham
 static __weak UIView *ttxClearPage;
 
+// Thanh tim kiem o video mo tu ket qua tim kiem: nam ngoai o feed nhung de len video. Chi che
+// view chua o nhap chu (khong che thanh tab duoi / tab tren cung cua trang chu).
+static NSHashTable<UIView *> *ttxClearOuterViews;
+
+static BOOL TTXIsSearchField(UIView *view) {
+	if ([view isKindOfClass:[UISearchBar class]] || [view isKindOfClass:[UITextField class]]) return YES;
+	NSString *name = NSStringFromClass([view class]).lowercaseString;
+	return [name containsString:@"searchbar"] || [name containsString:@"searchfield"] || [name containsString:@"searchtextfield"];
+}
+
+static BOOL TTXContainsSearchField(UIView *view, int depth) {
+	if (TTXIsSearchField(view)) return YES;
+	if (depth > 8) return NO;
+	for (UIView *sub in view.subviews) {
+		if (TTXContainsSearchField(sub, depth + 1)) return YES;
+	}
+	return NO;
+}
+
+// View nho (thanh tim kiem) thi che ca view, view lon chua no thi di vao trong
+static void TTXClearSearchOverlay(UIView *view, CGRect pageRect, NSHashTable *found, int depth) {
+	if (view.hidden || view.alpha < 0.01) return;
+	CGRect r = [view convertRect:view.bounds toView:nil];
+	if (!CGRectIntersectsRect(r, pageRect) || !TTXContainsSearchField(view, 0)) return;
+	if (r.size.width * r.size.height < pageRect.size.width * pageRect.size.height * 0.3) {
+		TTXClearView(view);
+		[found addObject:view];
+		return;
+	}
+	if (depth >= 8) return;
+	for (UIView *sub in view.subviews) TTXClearSearchOverlay(sub, pageRect, found, depth + 1);
+}
+
+// Tra lai thanh tim kiem da che (khi roi feed / khong con nam tren video dang hien)
+static void TTXRestoreSearchBars(NSHashTable *keep) {
+	for (UIView *view in ttxClearOuterViews.allObjects) {
+		if ([keep containsObject:view]) continue;
+		TTXRestoreView(view);
+		[ttxClearOuterViews removeObject:view];
+	}
+}
+
+static NSUInteger TTXClearSearchBars(UIView *page) {
+	CGRect pageRect = [page convertRect:page.bounds toView:nil];
+	NSHashTable *found = [NSHashTable weakObjectsHashTable];
+	// View ve sau (nam tren) o feed hoac to tien cua o, ngoai o
+	for (UIView *a = page; a.superview; a = a.superview) {
+		NSArray<UIView *> *siblings = a.superview.subviews;
+		NSUInteger idx = [siblings indexOfObjectIdenticalTo:a];
+		if (idx == NSNotFound) continue;
+		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearSearchOverlay(siblings[i], pageRect, found, 0);
+	}
+	TTXRestoreSearchBars(found);
+	for (UIView *view in found) [ttxClearOuterViews addObject:view];
+	return found.count;
+}
+
+// Goi moi giay: o video da roi man hinh (quay lai trang tim kiem) thi hien lai thanh tim kiem
+static void TTXCheckSearchBars(void) {
+	if (!ttxClearOuterViews.count) return;
+	UIView *page = ttxClearPage;
+	UIWindow *window = page.window;
+	if (window && CGRectIntersectsRect([page convertRect:page.bounds toView:nil], window.bounds)) return;
+	TTXRestoreSearchBars(nil);
+}
+
 // Chay tren main thread
 static void TTXApplyClearDisplay(id player) {
 	if (!ttxClearDisplay || ttxClearRevealed || !player) return;
@@ -601,9 +667,10 @@ static void TTXApplyClearDisplay(id player) {
 		if (idx == NSNotFound) continue;
 		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearOverlay(siblings[i], pageArea, 0);
 	}
-	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%ld, tong %lu | giu: %@", NSStringFromClass([playerView class]),
+	NSUInteger outer = TTXClearSearchBars(page);
+	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%ld, tong %lu | tim kiem: %lu | giu: %@", NSStringFromClass([playerView class]),
 		NSStringFromClass([page class]), (long)ttxClearedViews.count - (long)before, (unsigned long)ttxClearedViews.count,
-		ttxClearKeptClasses.count ? [ttxClearKeptClasses.array componentsJoinedByString:@", "] : @"-"];
+		(unsigned long)outer, ttxClearKeptClasses.count ? [ttxClearKeptClasses.array componentsJoinedByString:@", "] : @"-"];
 }
 
 // TikTok them nut / chu thich tre sau khi video hien nen che lai vai lan
@@ -627,6 +694,7 @@ static void TTXUpdateClearDisplay(void) {
 	ttxRevealToken++;
 	for (UIView *view in ttxClearedViews.allObjects) TTXRestoreView(view);
 	[ttxClearedViews removeAllObjects];
+	[ttxClearOuterViews removeAllObjects];
 	ttxClearInfo = @"da tra lai";
 }
 
@@ -1025,6 +1093,7 @@ static void TTXStartCarTimer(void) {
 	if (timer) return;
 	timer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t) {
 		TTXCarTick(ttxCurrentPlayer);
+		TTXCheckSearchBars();
 	}];
 }
 
@@ -1424,7 +1493,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.38 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.39 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d carZoom=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay, ttxCarZoom]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1451,6 +1520,7 @@ static void TTXLogDiagnostics(void) {
 	ttxLoopCalls = [NSCountedSet set];
 	ttxRemoteWrapped = [NSCountedSet set];
 	ttxClearedViews = [NSHashTable weakObjectsHashTable];
+	ttxClearOuterViews = [NSHashTable weakObjectsHashTable];
 	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
 	ttxEngines = [NSHashTable weakObjectsHashTable];
 	ttxCarViews = [NSMapTable weakToStrongObjectsMapTable];
