@@ -1,6 +1,6 @@
 Package: tiktokx
 Name: TikTokX
-Version: 1.0.39
+Version: 1.0.40
 Architecture: iphoneos-arm64
 Maintainer: AnLai
 Author: AnLai
@@ -10,7 +10,7 @@ Conflicts: com.anlai.tiktokx, com.tiktokx
 Replaces: com.anlai.tiktokx, com.tiktokx
 Icon: file:///var/jb/Library/TikTokX/icon.png
 Description: Background play, auto scroll and lock screen controls for TikTok
- TikTokX adds five features to TikTok, each with its own switch in Settings:
+ TikTokX adds four features to TikTok, each with its own switch in Settings:
  .
  - Background Play: keep audio playing when you leave TikTok or lock the screen.
  - Auto Scroll: move to the next video when the current one finishes.
@@ -18,8 +18,8 @@ Description: Background play, auto scroll and lock screen controls for TikTok
    Control Center with previous/next to scroll the feed.
  - Clear Display: hide the buttons, caption and overlays on videos;
    tap the video to show them for 3 seconds.
- - Car Screen Zoom: on a car display (CarBridge), fill the wide screen and
-   zoom portrait videos in a little.
+ .
+ On a car display (CarBridge) TikTok is shown at iPhone proportions, centered.
  .
  Settings are in English or Vietnamese. Requires Dopamine (rootless).
  License: MIT. Author: AnLai.

@@ -9,7 +9,6 @@ static BOOL ttxBackgroundAudio = kTTXDefaultBackgroundAudio;
 static BOOL ttxAutoNext = kTTXDefaultAutoNext;
 static BOOL ttxRemoteScroll = kTTXDefaultRemoteScroll;
 static BOOL ttxClearDisplay = kTTXDefaultClearDisplay;
-static BOOL ttxCarZoom = kTTXDefaultCarZoom;
 
 // Class co the la trinh phat / feed cua TikTok (ten thay doi theo phien ban)
 static NSArray<NSString *> *TTXPauseClasses(void) {
@@ -64,7 +63,6 @@ static void TTXLoadPrefs(void) {
 		ttxAutoNext = (state & kTTXStateAutoNext) != 0;
 		ttxRemoteScroll = (state & kTTXStateRemoteScroll) != 0;
 		ttxClearDisplay = (state & kTTXStateClearDisplay) != 0;
-		ttxCarZoom = (state & kTTXStateCarZoom) != 0;
 		source = @"notify";
 	} else {
 		NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:
@@ -73,15 +71,13 @@ static void TTXLoadPrefs(void) {
 		ttxAutoNext = TTXReadBool(kTTXAutoNext, kTTXDefaultAutoNext, prefs);
 		ttxRemoteScroll = TTXReadBool(kTTXRemoteScroll, kTTXDefaultRemoteScroll, prefs);
 		ttxClearDisplay = TTXReadBool(kTTXClearDisplay, kTTXDefaultClearDisplay, prefs);
-		ttxCarZoom = TTXReadBool(kTTXCarZoom, kTTXDefaultCarZoom, prefs);
 		source = @"plist";
 	}
-	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d carZoom=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay, ttxCarZoom);
+	NSLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
 }
 
 static void TTXSetupRemoteCommands(void);
 static void TTXUpdateClearDisplay(void);
-static void TTXUpdateCarZoom(void);
 
 static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
 	TTXLoadPrefs();
@@ -89,7 +85,6 @@ static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFSt
 	dispatch_async(dispatch_get_main_queue(), ^{
 		TTXSetupRemoteCommands();
 		TTXUpdateClearDisplay();
-		TTXUpdateCarZoom();
 	});
 }
 
@@ -124,6 +119,7 @@ static SEL ttxDisplaySel;
 
 static void TTXScheduleClearDisplay(id player);
 static void TTXScheduleCarFit(id player);
+static void TTXFitCarWindow(UIWindow *window);
 
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
@@ -751,27 +747,33 @@ static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
 	%orig;
 	if (ttxClearDisplay && event.type == UIEventTypeTouches) TTXHandleClearTouch(self, event);
 }
+
+// Man hinh xe: giu bo cuc iPhone thu nho (xem Car screen)
+- (void)layoutSubviews {
+	%orig;
+	TTXFitCarWindow(self);
+}
+
+- (void)didAddSubview:(UIView *)subview {
+	%orig;
+	// Man hinh trinh bay (binh luan, chia se...) them lop moi vao cua so
+	__weak UIWindow *weakSelf = self;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		TTXFitCarWindow(weakSelf);
+	});
+}
 %end
 
 #pragma mark - Car screen
 
-// CarBridge mo TikTok tren man hinh xe (rong, thap) nhung TikTok tinh khung video theo man
-// hinh dien thoai nen video chi nam trong 1 khung nho o goc. Khi cua so khac kich thuoc man
-// hinh dien thoai: keo o feed va view chua video cho phu het, hien video tron khung hinh
-// (aspect fit), video doc thi phong to vua phai neu bat "Car Screen Zoom". Moi view / layer
-// da sua duoc ghi lai gia tri goc de tra lai khi app quay ve man hinh dien thoai.
+// CarBridge mo TikTok tren man hinh xe (rong, thap). TikTok chi lam giao dien cho dien thoai
+// nen bi vo bo cuc. Khi cua so khac kich thuoc man hinh dien thoai: cho cac view goc cua cua
+// so (view cua root view controller, lop chua man hinh trinh bay) bo cuc dung kich thuoc
+// iPhone dung, roi thu nho cho vua chieu cao man hinh xe va dat giua - nhu phan chieu man
+// hinh iPhone. Quay ve dien thoai thi tra lai.
 static NSString *ttxCarInfo = @"-";
-static BOOL ttxCarActive;
-static NSMapTable<UIView *, NSDictionary *> *ttxCarViews;
-static NSMapTable<CALayer *, NSDictionary *> *ttxCarLayers;
-static NSHashTable *ttxEngines;
-static NSString *ttxEngineInfo = @"-";
-static const NSInteger kTTXScaleAspectFit = 1; // TTVideoEngineScalingModeAspectFit
-static const void *kTTXEngineMode = &kTTXEngineMode; // scaleMode TikTok muon dat
-// Phong to toi da cho video doc: 1.3 = con thay khoang 77% chieu cao video. Khong biet kich
-// thuoc video (co the la video ngang) thi chi phong to nhe de khong che mat hinh.
-static const CGFloat kTTXCarZoomMax = 1.3;
-static const CGFloat kTTXCarZoomUnknown = 1.1;
+static NSString *ttxCarWindows = @"-";
+static const void *kTTXCarScaled = &kTTXCarScaled;
 
 static BOOL TTXIsCarWindow(UIWindow *window) {
 	if (!window) return NO;
@@ -782,336 +784,75 @@ static BOOL TTXIsCarWindow(UIWindow *window) {
 	return !same;
 }
 
-static void TTXSaveView(UIView *view) {
-	if ([ttxCarViews objectForKey:view]) return;
-	[ttxCarViews setObject:@{
-		@"bounds": [NSValue valueWithCGRect:view.bounds],
-		@"center": [NSValue valueWithCGPoint:view.center],
-		@"transform": [NSValue valueWithCGAffineTransform:view.transform],
-		@"mask": @(view.autoresizingMask),
-		@"mode": @(view.contentMode),
-		@"clips": @(view.clipsToBounds),
-		@"gravity": view.layer.contentsGravity ?: kCAGravityResize,
-	} forKey:view];
-}
-
-static void TTXSaveLayer(CALayer *layer) {
-	if ([ttxCarLayers objectForKey:layer]) return;
-	NSMutableDictionary *saved = [@{
-		@"frame": [NSValue valueWithCGRect:layer.frame],
-		@"gravity": layer.contentsGravity ?: kCAGravityResize,
-	} mutableCopy];
-	if ([layer isKindOfClass:[AVPlayerLayer class]]) saved[@"video"] = ((AVPlayerLayer *)layer).videoGravity;
-	[ttxCarLayers setObject:saved forKey:layer];
-}
-
-static BOOL TTXSetViewFrame(UIView *view, CGRect frame) {
-	if (CGAffineTransformIsIdentity(view.transform) && CGRectEqualToRect(CGRectIntegral(view.frame), CGRectIntegral(frame))) return NO;
-	TTXSaveView(view);
-	view.transform = CGAffineTransformIdentity;
-	view.frame = frame;
-	return YES;
-}
-
-static BOOL TTXFillSuperview(UIView *view) {
-	if (!TTXSetViewFrame(view, view.superview.bounds)) return NO;
-	view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-	return YES;
-}
-
-static void TTXAspectFitView(UIView *view) {
-	if (view.contentMode == UIViewContentModeScaleAspectFit && [view.layer.contentsGravity isEqualToString:kCAGravityResizeAspect]) return;
-	TTXSaveView(view);
-	view.contentMode = UIViewContentModeScaleAspectFit;
-	view.layer.contentsGravity = kCAGravityResizeAspect;
-}
-
-static void TTXAspectFitLayer(CALayer *layer) {
-	TTXSaveLayer(layer);
-	if ([layer isKindOfClass:[AVPlayerLayer class]]) ((AVPlayerLayer *)layer).videoGravity = AVLayerVideoGravityResizeAspect;
-	else if (![layer.contentsGravity isEqualToString:kCAGravityResizeAspect]) layer.contentsGravity = kCAGravityResizeAspect;
-}
-
-// Lop ve video ben trong player: view / layer truoc do phu phan lon player. O cap ngoai cung
-// dat theo khung video (co the lon hon player khi phong to), ben trong thi phu view cha.
-static NSUInteger TTXFillRenderViews(UIView *view, CGFloat oldArea, CGRect videoRect, int depth) {
-	NSUInteger changed = 0;
-	for (UIView *sub in view.subviews) {
-		if (sub.hidden || sub.bounds.size.width * sub.bounds.size.height < oldArea * 0.5) continue;
-		if (depth == 0) {
-			if (TTXSetViewFrame(sub, videoRect)) {
-				sub.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-				changed++;
-			}
-		} else if (TTXFillSuperview(sub)) {
-			changed++;
-		}
-		TTXAspectFitView(sub);
-		if (depth < 3) changed += TTXFillRenderViews(sub, oldArea, sub.bounds, depth + 1);
-	}
-	CGRect target = depth == 0 ? videoRect : view.layer.bounds;
-	for (CALayer *layer in view.layer.sublayers) {
-		if ([layer.delegate isKindOfClass:[UIView class]]) continue; // layer cua subview, da xu ly
-		if (layer.bounds.size.width * layer.bounds.size.height < oldArea * 0.5) continue;
-		TTXAspectFitLayer(layer);
-		if (CGRectEqualToRect(CGRectIntegral(layer.frame), CGRectIntegral(target))) continue;
-		layer.frame = target;
-		changed++;
-	}
-	return changed;
-}
-
-// TTVideoEngine tu scale hinh theo scaleMode. Ghi nho engine va mode TikTok muon khi TikTok
-// dat scaleMode; ep aspect fit khi dang o man hinh xe.
-static void (*ttxOrigSetScaleMode)(id, SEL, NSInteger);
-static void TTXSetScaleMode(id self, SEL _cmd, NSInteger mode) {
-	@synchronized (ttxEngines) {
-		[ttxEngines addObject:self];
-	}
-	objc_setAssociatedObject(self, kTTXEngineMode, @(mode), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	ttxOrigSetScaleMode(self, _cmd, ttxCarActive ? kTTXScaleAspectFit : mode);
-}
-
-static void TTXHookScaleMode(void) {
-	Class cls = NSClassFromString(@"TTVideoEngine");
-	SEL sel = NSSelectorFromString(@"setScaleMode:");
-	Method method = cls ? class_getInstanceMethod(cls, sel) : NULL;
-	if (!method || method_getNumberOfArguments(method) != 3) {
-		ttxEngineInfo = @"khong co -[TTVideoEngine setScaleMode:]";
-		return;
-	}
-	MSHookMessageEx(cls, sel, (IMP)TTXSetScaleMode, (IMP *)&ttxOrigSetScaleMode);
-}
-
-// Engine cua player dang hien (neu lay duoc qua property) + moi engine da thay
-static NSSet *TTXCarEngines(id player) {
-	NSMutableSet *engines = [NSMutableSet set];
-	@synchronized (ttxEngines) {
-		[engines addObjectsFromArray:ttxEngines.allObjects];
-	}
-	for (NSString *name in @[@"videoEngine", @"engine", @"ttVideoEngine", @"playerEngine", @"player"]) {
-		SEL sel = NSSelectorFromString(name);
-		if (![player respondsToSelector:sel]) continue;
-		id obj = ((id (*)(id, SEL))objc_msgSend)(player, sel);
-		if ([obj respondsToSelector:NSSelectorFromString(@"setScaleMode:")]) [engines addObject:obj];
-	}
-	return engines;
-}
-
-// fit = YES: ep aspect fit; NO: tra lai mode TikTok da dat
-static void TTXSetEnginesFit(id player, BOOL fit) {
-	SEL getter = NSSelectorFromString(@"scaleMode"), setter = NSSelectorFromString(@"setScaleMode:");
-	NSSet *engines = TTXCarEngines(player);
-	NSUInteger set = 0;
-	for (id engine in engines) {
-		if (![engine respondsToSelector:getter] || ![engine respondsToSelector:setter]) continue;
-		NSInteger current = ((NSInteger (*)(id, SEL))objc_msgSend)(engine, getter);
-		NSNumber *wanted = objc_getAssociatedObject(engine, kTTXEngineMode);
-		if (fit) {
-			if (current == kTTXScaleAspectFit) continue;
-			if (!wanted) objc_setAssociatedObject(engine, kTTXEngineMode, @(current), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-			((void (*)(id, SEL, NSInteger))objc_msgSend)(engine, setter, kTTXScaleAspectFit);
-		} else {
-			if (!wanted || current == wanted.integerValue) continue;
-			((void (*)(id, SEL, NSInteger))objc_msgSend)(engine, setter, wanted.integerValue);
-		}
-		set++;
-	}
-	ttxEngineInfo = [NSString stringWithFormat:@"engine %lu, %@ %lu", (unsigned long)engines.count, fit ? @"doi sang fit" : @"tra lai", (unsigned long)set];
-}
-
-// Kich thuoc video: tu engine (method tra CGSize) hoac tu model video cua player
-static NSString *ttxVideoSizeSource = @"-";
-
-static CGSize TTXVideoSize(id player) {
-	for (id engine in TTXCarEngines(player)) {
-		for (NSString *name in @[@"videoSize", @"naturalSize", @"presentationSize"]) {
-			Method m = class_getInstanceMethod(object_getClass(engine), NSSelectorFromString(name));
-			const char *type = m ? method_getTypeEncoding(m) : NULL;
-			if (!type || strncmp(type, "{CGSize", 7) != 0) continue;
-			CGSize size = ((CGSize (*)(id, SEL))objc_msgSend)(engine, NSSelectorFromString(name));
-			if (size.width > 1 && size.height > 1) {
-				ttxVideoSizeSource = [NSString stringWithFormat:@"%@.%@", NSStringFromClass(object_getClass(engine)), name];
-				return size;
-			}
-		}
-	}
-	for (NSString *path in @[@"model.video", @"aweme.video", @"awemeModel.video", @"videoModel.video", @"model", @"video"]) {
-		@try {
-			id video = [player valueForKeyPath:path];
-			id w = [video valueForKey:@"width"], h = [video valueForKey:@"height"];
-			if ([w respondsToSelector:@selector(doubleValue)] && [h respondsToSelector:@selector(doubleValue)]
-				&& [w doubleValue] > 1 && [h doubleValue] > 1) {
-				ttxVideoSizeSource = path;
-				return CGSizeMake([w doubleValue], [h doubleValue]);
-			}
-		} @catch (NSException *e) {
-		}
-	}
-	ttxVideoSizeSource = @"khong ro (coi la video doc)";
-	return CGSizeZero;
-}
-
-// Khung ve video trong player: bang player, hoac lon hon (giu tam) khi phong to video doc
-static CGRect TTXVideoRect(id player, CGRect bounds, CGFloat *zoomOut) {
-	*zoomOut = 1;
-	if (!ttxCarZoom || bounds.size.width < 1 || bounds.size.height < 1) return bounds;
-	CGSize video = TTXVideoSize(player);
-	CGFloat maxZoom = kTTXCarZoomMax;
-	if (video.width < 1) {
-		video = CGSizeMake(9, 16);
-		maxZoom = kTTXCarZoomUnknown;
-	}
-	if (video.width >= video.height) return bounds; // video ngang / vuong: hien tron
-	CGFloat fit = MIN(bounds.size.width / video.width, bounds.size.height / video.height);
-	CGFloat fill = MAX(bounds.size.width / video.width, bounds.size.height / video.height);
-	CGFloat zoom = MIN(fill / fit, maxZoom);
-	*zoomOut = zoom;
-	return CGRectInset(bounds, -bounds.size.width * (zoom - 1) / 2, -bounds.size.height * (zoom - 1) / 2);
-}
-
-// Tra lai moi view / layer da sua (2 luot vi doi khung view cha lam autoresizing doi khung
-// view con) va scaleMode cua engine. Chay tren main thread.
-static void TTXRestoreCar(id player) {
-	ttxCarActive = NO;
-	NSUInteger count = ttxCarViews.count + ttxCarLayers.count;
-	for (int pass = 0; pass < 2; pass++) {
-		for (UIView *view in ttxCarViews.keyEnumerator.allObjects) {
-			NSDictionary *s = [ttxCarViews objectForKey:view];
-			view.autoresizingMask = [s[@"mask"] unsignedIntegerValue];
-			view.transform = CGAffineTransformIdentity;
-			view.bounds = [s[@"bounds"] CGRectValue];
-			view.center = [s[@"center"] CGPointValue];
-			view.transform = [s[@"transform"] CGAffineTransformValue];
-			view.contentMode = [s[@"mode"] integerValue];
-			view.clipsToBounds = [s[@"clips"] boolValue];
-			view.layer.contentsGravity = s[@"gravity"];
-		}
-		for (CALayer *layer in ttxCarLayers.keyEnumerator.allObjects) {
-			NSDictionary *s = [ttxCarLayers objectForKey:layer];
-			layer.frame = [s[@"frame"] CGRectValue];
-			layer.contentsGravity = s[@"gravity"];
-			if (s[@"video"]) ((AVPlayerLayer *)layer).videoGravity = s[@"video"];
-		}
-	}
-	for (UIView *view in ttxCarViews.keyEnumerator.allObjects) [view.superview setNeedsLayout];
-	[ttxCarViews removeAllObjects];
-	[ttxCarLayers removeAllObjects];
-	TTXSetEnginesFit(player, NO);
-	ttxCarInfo = [NSString stringWithFormat:@"ve dien thoai, tra lai %lu | %@", (unsigned long)count, ttxEngineInfo];
-	NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
+// Kich thuoc iPhone dung
+static CGSize TTXPhoneSize(void) {
+	CGSize m = [UIScreen mainScreen].bounds.size;
+	return CGSizeMake(MIN(m.width, m.height), MAX(m.width, m.height));
 }
 
 // Chay tren main thread
-static void TTXApplyCarFit(id player) {
-	UIView *playerView = TTXPlayerView(player);
-	UIWindow *window = playerView.window;
-	if (!TTXIsCarWindow(window)) return;
-
-	UIView *page = TTXFindPage(playerView);
-	if (!page) {
-		ttxCarInfo = [NSString stringWithFormat:@"khong tim thay o feed (%@)", NSStringFromClass([playerView class])];
-		return;
-	}
-	ttxCarActive = YES;
-	CGRect oldFrame = [playerView convertRect:playerView.bounds toView:window];
-	CGFloat oldArea = playerView.bounds.size.width * playerView.bounds.size.height;
-	NSUInteger changed = 0;
-	CGRect oldPage = [page convertRect:page.bounds toView:window];
-	// O feed (va cac view chua no, vd. trang cua tab tren cung) van rong bang man hinh dien
-	// thoai: keo ngang cho bang view cha. Trong scroll view giu x va chi keo trang dang hien.
-	NSMutableArray *outer = [NSMutableArray array];
-	for (UIView *v = page; v.superview && v.superview != window; v = v.superview) [outer insertObject:v atIndex:0];
-	for (UIView *v in outer) {
-		UIView *parent = v.superview;
-		CGFloat w = parent.bounds.size.width;
-		CGRect f = v.frame;
-		if (f.size.width >= w - 2 || f.size.width < w * 0.2) continue; // da du rong / view phu nho
-		CGFloat x = 0;
-		if ([parent isKindOfClass:[UIScrollView class]]) {
-			x = f.origin.x;
-			if (fabs(((UIScrollView *)parent).contentOffset.x - x) > 2) continue;
+static void TTXFitCarWindow(UIWindow *window) {
+	if (!window) return;
+	// Cua so ban phim cua he thong: de nguyen
+	NSString *name = NSStringFromClass([window class]);
+	if ([name containsString:@"Keyboard"] || [name containsString:@"TextEffects"]) return;
+	BOOL car = TTXIsCarWindow(window);
+	CGSize phone = TTXPhoneSize();
+	CGRect wb = window.bounds;
+	CGFloat scale = MIN(wb.size.width / phone.width, wb.size.height / phone.height);
+	CGPoint center = CGPointMake(CGRectGetMidX(wb), CGRectGetMidY(wb));
+	for (UIView *view in window.subviews) {
+		BOOL scaled = objc_getAssociatedObject(view, kTTXCarScaled) != nil;
+		if (car) {
+			CGAffineTransform t = CGAffineTransformMakeScale(scale, scale);
+			if (scaled && CGAffineTransformEqualToTransform(view.transform, t)
+				&& CGSizeEqualToSize(view.bounds.size, phone) && CGPointEqualToPoint(view.center, center)) continue;
+			objc_setAssociatedObject(view, kTTXCarScaled, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			view.transform = CGAffineTransformIdentity;
+			view.bounds = CGRectMake(0, 0, phone.width, phone.height);
+			view.center = center;
+			view.transform = t;
+			ttxCarInfo = [NSString stringWithFormat:@"cua so %@ -> iPhone %@ x%.2f (%@)", NSStringFromCGSize(wb.size),
+				NSStringFromCGSize(phone), scale, NSStringFromClass([view class])];
+			NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
+		} else if (scaled) {
+			objc_setAssociatedObject(view, kTTXCarScaled, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			view.transform = CGAffineTransformIdentity;
+			view.frame = wb;
+			[view setNeedsLayout];
+			ttxCarInfo = [NSString stringWithFormat:@"ve dien thoai, tra lai %@", NSStringFromClass([view class])];
+			NSLog(@"[TikTokX] Car: %@", ttxCarInfo);
 		}
-		if (TTXSetViewFrame(v, CGRectMake(x, f.origin.y, w, f.size.height))) changed++;
 	}
-	NSMutableArray *chain = [NSMutableArray array];
-	for (UIView *v = playerView; v && v != page; v = v.superview) [chain insertObject:v atIndex:0];
-	// Tu ngoai vao trong de moi view lay bounds moi cua view cha
-	for (UIView *v in chain) {
-		if (TTXFillSuperview(v)) changed++;
-	}
-	CGFloat zoom = 1;
-	CGRect videoRect = TTXVideoRect(player, playerView.bounds, &zoom);
-	if (zoom > 1 && !playerView.clipsToBounds) {
-		TTXSaveView(playerView);
-		playerView.clipsToBounds = YES;
-	}
-	if (oldArea > 0) changed += TTXFillRenderViews(playerView, oldArea, videoRect, 0);
-	TTXSetEnginesFit(player, YES);
-
-	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ -> %@ | player %@ %@ -> %@ | phong to %.2f (%@) | sua %lu | %@",
-		NSStringFromCGSize(window.bounds.size), NSStringFromCGSize([UIScreen mainScreen].bounds.size),
-		NSStringFromClass([page class]), NSStringFromCGRect(oldPage), NSStringFromCGRect([page convertRect:page.bounds toView:window]),
-		NSStringFromClass([playerView class]), NSStringFromCGRect(oldFrame),
-		NSStringFromCGRect([playerView convertRect:playerView.bounds toView:window]), zoom, ttxVideoSizeSource,
-		(unsigned long)changed, ttxEngineInfo];
-	if (changed) NSLog(@"[TikTokX] Car: %@", info);
-	ttxCarInfo = info;
 }
 
-// Kiem tra cua so dang o man hinh xe hay dien thoai: o xe thi keo / phong to, vua quay ve
-// dien thoai thi tra lai. Chay moi giay de bat duoc luc chuyen man hinh giua chung.
-static NSString *ttxCarWindows = @"-";
-
-// Khong doi ttxAppActive: mo tren dien thoai truoc roi chuyen len xe thi app thuong o trang thai
-// khong active (dien thoai sang man hinh khac) du video van hien tren xe.
-static void TTXCarTick(id player) {
-	UIWindow *window = TTXPlayerView(player).window;
-	// Ghi lai cac cua so cua app de biet player co nam o cua so man hinh xe khong
+// Kiem tra moi cua so cua app (ke ca khi app khong active: mo tren dien thoai truoc roi
+// chuyen len xe thi dien thoai sang man hinh khac nhung video van hien tren xe).
+static void TTXCarTick(void) {
 	NSMutableArray *sizes = [NSMutableArray array];
 	for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
 		if (![scene isKindOfClass:[UIWindowScene class]]) continue;
 		for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-			if (w.hidden) continue;
-			[sizes addObject:[NSString stringWithFormat:@"%@%@%@", NSStringFromCGSize(w.bounds.size),
-				TTXIsCarWindow(w) ? @" xe" : @"", w == window ? @" (player)" : @""]];
+			TTXFitCarWindow(w);
+			if (!w.hidden) [sizes addObject:[NSString stringWithFormat:@"%@%@", NSStringFromCGSize(w.bounds.size), TTXIsCarWindow(w) ? @" xe" : @""]];
 		}
 	}
 	ttxCarWindows = [NSString stringWithFormat:@"active=%d | %@", ttxAppActive, [sizes componentsJoinedByString:@", "]];
-	static NSString *lastWindows;
-	if (![ttxCarWindows isEqualToString:lastWindows]) {
-		lastWindows = ttxCarWindows;
-		NSLog(@"[TikTokX] Car cua so: %@", ttxCarWindows);
-	}
-	if (!window) return;
-	if (TTXIsCarWindow(window)) TTXApplyCarFit(player);
-	else if (ttxCarActive || ttxCarViews.count || ttxCarLayers.count) TTXRestoreCar(player);
 }
 
 static void TTXStartCarTimer(void) {
 	static NSTimer *timer;
 	if (timer) return;
 	timer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *t) {
-		TTXCarTick(ttxCurrentPlayer);
+		TTXCarTick();
 		TTXCheckSearchBars();
 	}];
 }
 
-// Gat "Car Screen Zoom" trong Settings: dat lai khung video ngay
-static void TTXUpdateCarZoom(void) {
-	if (!ttxCarActive) return;
-	TTXRestoreCar(ttxCurrentPlayer);
-	TTXCarTick(ttxCurrentPlayer);
-}
-
 static void TTXScheduleCarFit(id player) {
-	if (!player) return;
-	__weak id weakPlayer = player;
-	for (NSNumber *delay in @[@0, @0.5, @1.5]) {
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-			TTXCarTick(weakPlayer);
-		});
-	}
+	dispatch_async(dispatch_get_main_queue(), ^{
+		TTXCarTick();
+	});
 }
 
 #pragma mark - Remote commands
@@ -1493,9 +1234,9 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.39 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.40 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
-	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d carZoom=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay, ttxCarZoom]];
+	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Car: %@ | cua so: %@", ttxCarInfo, ttxCarWindows]];
@@ -1522,9 +1263,6 @@ static void TTXLogDiagnostics(void) {
 	ttxClearedViews = [NSHashTable weakObjectsHashTable];
 	ttxClearOuterViews = [NSHashTable weakObjectsHashTable];
 	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
-	ttxEngines = [NSHashTable weakObjectsHashTable];
-	ttxCarViews = [NSMapTable weakToStrongObjectsMapTable];
-	ttxCarLayers = [NSMapTable weakToStrongObjectsMapTable];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,
@@ -1561,7 +1299,6 @@ static void TTXLogDiagnostics(void) {
 
 	for (NSString *name in TTXPauseClasses()) TTXHookBackgroundClass(name);
 	for (NSString *name in TTXLoopClasses()) TTXHookLoop(name);
-	TTXHookScaleMode();
 
 	ttxDisplaySel = NSSelectorFromString(@"containerDidFullyDisplayWithReason:");
 	ttxBoolHooks = [NSMutableArray array];
