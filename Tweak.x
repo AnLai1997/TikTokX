@@ -118,6 +118,7 @@ static __weak id ttxCurrentPlayer;
 static SEL ttxDisplaySel;
 
 static void TTXScheduleClearDisplay(id player);
+static void TTXScheduleCarFit(id player);
 
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
@@ -125,6 +126,7 @@ static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
 		if (sel == ttxDisplaySel) {
 			ttxCurrentPlayer = obj;
 			TTXScheduleClearDisplay(obj);
+			TTXScheduleCarFit(obj);
 		}
 		return NO;
 	}
@@ -422,7 +424,10 @@ static void TTXHookLoop(NSString *className) {
 	__block void (*orig)(id, SEL, id) = NULL;
 	IMP repl = imp_implementationWithBlock(^(id obj, id arg) {
 		TTXCount(ttxLoopCalls, obj);
-		if (ttxAppActive) TTXScheduleClearDisplay(obj);
+		if (ttxAppActive) {
+			TTXScheduleClearDisplay(obj);
+			TTXScheduleCarFit(obj);
+		}
 		// O nen TikTok co the tu cuon (isAutoPlayEnabled): de no lam truoc, chi cuon neu feed dung yen
 		if (ttxAutoNext && !ttxAppActive) {
 			orig(obj, sel, arg);
@@ -449,6 +454,7 @@ static void TTXHookLoop(NSString *className) {
 	%orig;
 	ttxVisibleFeed = self;
 	TTXScheduleClearDisplay(ttxCurrentPlayer);
+	TTXScheduleCarFit(ttxCurrentPlayer);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -675,6 +681,100 @@ static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
 	if (ttxClearDisplay && event.type == UIEventTypeTouches) TTXHandleClearTouch(self, event);
 }
 %end
+
+#pragma mark - Car screen
+
+// CarBridge mo TikTok tren man hinh xe (rong, thap) nhung TikTok tinh khung video theo man
+// hinh dien thoai nen video chi nam trong 1 khung nho o goc. Khi cua so khac kich thuoc man
+// hinh dien thoai: keo view chua video (tu player len den o feed) va lop ve video ben trong
+// cho phu het o.
+static NSString *ttxCarInfo = @"-";
+static NSTimer *ttxCarTimer;
+
+static BOOL TTXIsCarWindow(UIWindow *window) {
+	if (!window) return NO;
+	if (window.screen && window.screen != [UIScreen mainScreen]) return YES;
+	CGSize w = window.bounds.size, m = [UIScreen mainScreen].bounds.size;
+	BOOL same = (fabs(w.width - m.width) < 2 && fabs(w.height - m.height) < 2)
+		|| (fabs(w.width - m.height) < 2 && fabs(w.height - m.width) < 2);
+	return !same;
+}
+
+static BOOL TTXFillSuperview(UIView *view) {
+	CGRect target = view.superview.bounds;
+	if (CGRectEqualToRect(CGRectIntegral(view.frame), CGRectIntegral(target))) return NO;
+	view.transform = CGAffineTransformIdentity;
+	view.frame = target;
+	view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+	return YES;
+}
+
+// Lop ve video ben trong player: view / layer truoc do phu phan lon player
+static NSUInteger TTXFillRenderViews(UIView *view, CGFloat oldArea, int depth) {
+	NSUInteger changed = 0;
+	for (UIView *sub in view.subviews) {
+		if (sub.hidden || sub.bounds.size.width * sub.bounds.size.height < oldArea * 0.5) continue;
+		if (TTXFillSuperview(sub)) changed++;
+		if (depth < 3) changed += TTXFillRenderViews(sub, oldArea, depth + 1);
+	}
+	for (CALayer *layer in view.layer.sublayers) {
+		if ([layer.delegate isKindOfClass:[UIView class]]) continue; // layer cua subview, da xu ly
+		if (layer.bounds.size.width * layer.bounds.size.height < oldArea * 0.5) continue;
+		if (CGRectEqualToRect(CGRectIntegral(layer.frame), CGRectIntegral(view.layer.bounds))) continue;
+		layer.frame = view.layer.bounds;
+		if ([layer isKindOfClass:[AVPlayerLayer class]]) ((AVPlayerLayer *)layer).videoGravity = AVLayerVideoGravityResizeAspect;
+		changed++;
+	}
+	return changed;
+}
+
+// Chay tren main thread
+static void TTXApplyCarFit(id player) {
+	UIView *playerView = TTXPlayerView(player);
+	UIWindow *window = playerView.window;
+	if (!TTXIsCarWindow(window)) return;
+
+	UIView *page = TTXFindPage(playerView);
+	if (!page) {
+		ttxCarInfo = [NSString stringWithFormat:@"khong tim thay o feed (%@)", NSStringFromClass([playerView class])];
+		return;
+	}
+	CGRect oldFrame = [playerView convertRect:playerView.bounds toView:window];
+	CGFloat oldArea = playerView.bounds.size.width * playerView.bounds.size.height;
+	NSUInteger changed = 0;
+	NSMutableArray *chain = [NSMutableArray array];
+	for (UIView *v = playerView; v && v != page; v = v.superview) [chain insertObject:v atIndex:0];
+	// Tu ngoai vao trong de moi view lay bounds moi cua view cha
+	for (UIView *v in chain) {
+		if (TTXFillSuperview(v)) changed++;
+	}
+	if (oldArea > 0) changed += TTXFillRenderViews(playerView, oldArea, 0);
+
+	NSString *info = [NSString stringWithFormat:@"cua so %@ (man hinh dt %@) | o %@ %@ | player %@ %@ -> %@ | sua %lu",
+		NSStringFromCGSize(window.bounds.size), NSStringFromCGSize([UIScreen mainScreen].bounds.size),
+		NSStringFromClass([page class]), NSStringFromCGRect([page convertRect:page.bounds toView:window]),
+		NSStringFromClass([playerView class]), NSStringFromCGRect(oldFrame),
+		NSStringFromCGRect([playerView convertRect:playerView.bounds toView:window]), (unsigned long)changed];
+	if (changed) NSLog(@"[TikTokX] Car: %@", info);
+	ttxCarInfo = info;
+
+	// TikTok co the dat lai khung khi doi video / xoay: kiem tra lai moi giay khi dang o man hinh xe
+	if (!ttxCarTimer) {
+		ttxCarTimer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
+			if (ttxAppActive) TTXApplyCarFit(ttxCurrentPlayer);
+		}];
+	}
+}
+
+static void TTXScheduleCarFit(id player) {
+	if (!player) return;
+	__weak id weakPlayer = player;
+	for (NSNumber *delay in @[@0, @0.5, @1.5]) {
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			TTXApplyCarFit(weakPlayer);
+		});
+	}
+}
 
 #pragma mark - Remote commands
 
@@ -1055,11 +1155,12 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.32 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.33 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
 	[lines addObject:[NSString stringWithFormat:@"Loop: %@ | autoNext=%lu (lan cuoi: %@)", TTXDescribeCounts(ttxLoopCalls), (unsigned long)ttxAutoNextHits, ttxLastScrollInfo]];
+	[lines addObject:[NSString stringWithFormat:@"Car: %@", ttxCarInfo]];
 	[lines addObject:[NSString stringWithFormat:@"Remote: xuong=%lu len=%lu (%@) | wrap: %@", (unsigned long)ttxRemoteNext, (unsigned long)ttxRemotePrev, ttxRemoteInfo, TTXDescribeCounts(ttxRemoteWrapped)]];
 	[lines addObject:@"--- Goi tren class tinh nang ---"];
 	[lines addObject:TTXDescribeCounts(ttxTraceCalls)];
