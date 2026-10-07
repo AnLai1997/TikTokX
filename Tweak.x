@@ -861,28 +861,16 @@ static void TTXHandleClearTouch(UIWindow *window, UIEvent *event) {
 #pragma mark - Car screen video
 
 // Tren man hinh xe TikTok tu dat khung video theo ti le video; chi can dat khung do vao giua
-// phan o nhin thay. Moi view da sua duoc ghi lai gia tri goc de tra lai khi ve man hinh dien thoai.
+// phan o nhin thay (sublayerTransform cua view cha). Ve man hinh dien thoai thi bo transform.
 static NSString *ttxCarVideoInfo = @"-";
 static BOOL ttxCarActive;
 static NSMapTable<UIView *, NSDictionary *> *ttxCarViews;
 static NSMapTable<CALayer *, NSDictionary *> *ttxCarLayers;
+static NSHashTable<CALayer *> *ttxCarSublayers; // view cha da dat sublayerTransform thu nho video
 static NSHashTable *ttxEngines;
 static NSString *ttxEngineInfo = @"-";
 static const NSInteger kTTXScaleAspectFit = 1; // TTVideoEngineScalingModeAspectFit
 static const void *kTTXEngineMode = &kTTXEngineMode; // scaleMode TikTok muon dat
-
-static void TTXSaveView(UIView *view) {
-	if ([ttxCarViews objectForKey:view]) return;
-	[ttxCarViews setObject:@{
-		@"bounds": [NSValue valueWithCGRect:view.bounds],
-		@"center": [NSValue valueWithCGPoint:view.center],
-		@"transform": [NSValue valueWithCGAffineTransform:view.transform],
-		@"mask": @(view.autoresizingMask),
-		@"mode": @(view.contentMode),
-		@"clips": @(view.clipsToBounds),
-		@"gravity": view.layer.contentsGravity ?: kCAGravityResize,
-	} forKey:view];
-}
 
 // TTVideoEngine tu scale hinh theo scaleMode. Ghi nho engine va mode TikTok muon khi TikTok
 // dat scaleMode (khong ep nua: TikTok tu dat khung video theo ti le video).
@@ -947,7 +935,7 @@ static void TTXSetEnginesFit(id player, BOOL fit) {
 // view con) va scaleMode cua engine. Chay tren main thread.
 static void TTXRestoreCarVideo(id player) {
 	ttxCarActive = NO;
-	NSUInteger count = ttxCarViews.count + ttxCarLayers.count;
+	NSUInteger count = ttxCarViews.count + ttxCarLayers.count + ttxCarSublayers.count;
 	for (int pass = 0; pass < 2; pass++) {
 		for (UIView *view in ttxCarViews.keyEnumerator.allObjects) {
 			NSDictionary *s = [ttxCarViews objectForKey:view];
@@ -967,6 +955,8 @@ static void TTXRestoreCarVideo(id player) {
 			if (s[@"video"]) ((AVPlayerLayer *)layer).videoGravity = s[@"video"];
 		}
 	}
+	for (CALayer *layer in ttxCarSublayers.allObjects) layer.sublayerTransform = CATransform3DIdentity;
+	[ttxCarSublayers removeAllObjects];
 	for (UIView *view in ttxCarViews.keyEnumerator.allObjects) [view.superview setNeedsLayout];
 	[ttxCarViews removeAllObjects];
 	[ttxCarLayers removeAllObjects];
@@ -1036,9 +1026,10 @@ static UIView *TTXVideoFrameView(UIView *leaf, UIView *top) {
 	return found;
 }
 
-// Chay tren main thread, chi khi dang o man hinh xe. Khong keo gian lop ve video nua (ban
-// 1.0.43-1.0.49 keo TTMetalView ra ca o lam drawable lech khung, hinh lech): giu kich thuoc TikTok
-// chon, chi dat khung video vao giua phan o nhin thay tren man hinh, thu nho (giu ti le) neu lon hon.
+// Chay tren main thread, chi khi dang o man hinh xe. Khong doi khung nao cua TikTok (doi khung
+// thi drawable / MTKView ben trong lech khung, va TikTok dat lai moi giay): dat sublayerTransform
+// cho view cha cua khung video de hien khung do thu nho vua phan o nhin thay (giu ti le) va o giua.
+// Vd. De xuat: TTMetalView 1190x2115 (phong day theo chieu ngang) -> hien 270x480 giua man hinh.
 static void TTXApplyCarVideoView(UIView *playerView, id player) {
 	if (!playerView.window) return;
 	UIView *page = TTXFindPage(playerView);
@@ -1067,22 +1058,35 @@ static void TTXApplyCarVideoView(UIView *playerView, id player) {
 	CGRect visible = CGRectIntersection([page convertRect:page.bounds toView:window], window.bounds);
 	CGRect area = page.bounds;
 	if (!CGRectIsNull(visible) && visible.size.width > 1 && visible.size.height > 1) area = [page convertRect:visible fromView:window];
-	CGRect old = [frameView convertRect:frameView.bounds toView:page];
-	CGSize size = frameView.bounds.size;
-	CGFloat k = MIN(1, MIN(area.size.width / MAX(size.width, 1), area.size.height / MAX(size.height, 1)));
-	size = CGSizeMake(round(size.width * k), round(size.height * k));
-	CGPoint center = [page convertPoint:CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area)) toView:frameView.superview];
-	BOOL changed = NO;
-	if (fabs(frameView.center.x - center.x) > 1 || fabs(frameView.center.y - center.y) > 1
-		|| fabs(frameView.bounds.size.width - size.width) > 1 || fabs(frameView.bounds.size.height - size.height) > 1) {
-		TTXSaveView(frameView);
-		frameView.bounds = CGRectMake(0, 0, size.width, size.height);
-		frameView.center = center;
-		changed = YES;
+	// Tinh trong toa do view cha (P), khong qua sublayerTransform cua chinh P
+	UIView *parent = frameView.superview;
+	CGRect f = frameView.frame;
+	CGRect fPage = [parent convertRect:f toView:page];
+	CGPoint areaCenter = CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area));
+	if (!CGRectContainsPoint(fPage, areaCenter)) {
+		ttxCarVideoInfo = [NSString stringWithFormat:@"o %@ | khung %@ %@ khong o giua, bo qua", NSStringFromClass([page class]),
+			NSStringFromClass([frameView class]), NSStringFromCGRect(fPage)];
+		return;
 	}
-	ttxCarVideoInfo = [NSString stringWithFormat:@"o %@ %@ | khung %@ %@ -> %@ | nhin thay %@ | lop ve %@",
-		NSStringFromClass([page class]), NSStringFromCGRect(page.bounds), NSStringFromClass([frameView class]), NSStringFromCGRect(old),
-		NSStringFromCGRect([frameView convertRect:frameView.bounds toView:page]), NSStringFromCGRect(area), TTXDescribeLayer(leaf.layer)];
+	CGPoint target = [page convertPoint:areaCenter toView:parent];
+	CGPoint pc = CGPointMake(CGRectGetMidX(parent.bounds), CGRectGetMidY(parent.bounds));
+	CGFloat k = MIN(1, MIN(area.size.width / MAX(f.size.width, 1), area.size.height / MAX(f.size.height, 1)));
+	CGFloat dx = (target.x - pc.x) - k * (CGRectGetMidX(f) - pc.x);
+	CGFloat dy = (target.y - pc.y) - k * (CGRectGetMidY(f) - pc.y);
+	CATransform3D m = CATransform3DIdentity;
+	if (k < 0.999 || fabs(dx) > 0.5 || fabs(dy) > 0.5) m = CATransform3DConcat(CATransform3DMakeScale(k, k, 1), CATransform3DMakeTranslation(dx, dy, 0));
+	CATransform3D cur = parent.layer.sublayerTransform;
+	BOOL changed = fabs(cur.m11 - m.m11) > 0.001 || fabs(cur.m22 - m.m22) > 0.001 || fabs(cur.m41 - m.m41) > 0.5 || fabs(cur.m42 - m.m42) > 0.5;
+	if (changed) {
+		[CATransaction begin];
+		[CATransaction setDisableActions:YES];
+		parent.layer.sublayerTransform = m;
+		[CATransaction commit];
+		[ttxCarSublayers addObject:parent.layer];
+	}
+	ttxCarVideoInfo = [NSString stringWithFormat:@"o %@ %@ | khung %@ %@ trong %@ | thu nho %.3f dich %.0f,%.0f | nhin thay %@ | lop ve %@",
+		NSStringFromClass([page class]), NSStringFromCGRect(page.bounds), NSStringFromClass([frameView class]), NSStringFromCGRect(fPage),
+		NSStringFromClass([parent class]), k, dx, dy, NSStringFromCGRect(area), TTXDescribeLayer(leaf.layer)];
 	if (changed) TTXLog(@"[TikTokX] Car video: %@", ttxCarVideoInfo);
 }
 
@@ -1332,7 +1336,7 @@ static void TTXCarTick(void) {
 		if (carWin) TTXApplyCarVideo(ttxCurrentPlayer, carWin);
 		return;
 	}
-	if (target.width < 1 && (ttxCarActive || ttxCarViews.count || ttxCarLayers.count)) TTXRestoreCarVideo(ttxCurrentPlayer);
+	if (target.width < 1 && (ttxCarActive || ttxCarViews.count || ttxCarLayers.count || ttxCarSublayers.count)) TTXRestoreCarVideo(ttxCurrentPlayer);
 	ttxCarScreen = target;
 	ttxCarInfo = target.width > 0
 		? [NSString stringWithFormat:@"man hinh xe %@ (%@)", NSStringFromCGSize(target), carWindow]
@@ -1748,7 +1752,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.50 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.51 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1784,6 +1788,7 @@ static void TTXLogDiagnostics(void) {
 	ttxEngines = [NSHashTable weakObjectsHashTable];
 	ttxCarViews = [NSMapTable weakToStrongObjectsMapTable];
 	ttxCarLayers = [NSMapTable weakToStrongObjectsMapTable];
+	ttxCarSublayers = [NSHashTable weakObjectsHashTable];
 	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
 	ttxClearLoggedPages = [NSMutableSet set];
 	ttxInstalled = [NSMutableArray array];
