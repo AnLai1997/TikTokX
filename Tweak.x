@@ -155,6 +155,7 @@ static SEL ttxDisplaySel;
 static void TTXScheduleClearDisplay(id player);
 static void TTXScheduleCarFit(id player);
 static void TTXCarTick(void);
+static void TTXScheduleCarRelayout(void);
 
 // Tra ve YES neu da chan, NO neu can goi IMP goc
 static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
@@ -1275,9 +1276,11 @@ static BOOL TTXIsCarWindow(UIWindow *window) {
 // TikTok tinh nhieu khung theo [UIScreen mainScreen].bounds (kich thuoc iPhone) nen tren man
 // hinh xe bo cuc bi vo. O man hinh xe: bao mainScreen co kich thuoc dung bang khung CarPlay
 // de TikTok bo cuc vua khung xe nhu tren mot may co man hinh do.
-// Chi bao kich thuoc xe cho code cua TikTok: UIKit (ban phim, cua so he thong...) van thay kich
-// thuoc that, neu khong ban phim bi tinh sai va hien khong du.
+// Luc go chu (o nhap dang focus / ban phim dang hien) UIKit thay kich thuoc that, neu khong ban
+// phim bi tinh sai va hien khong du. Luc khac UIKit cung thay kich thuoc xe: ban 1.0.45-1.0.47
+// luon cho UIKit kich thuoc that thi video het nam giua (1.0.43 van giua o Tim kiem).
 static uintptr_t ttxUIKitStart, ttxUIKitEnd;
+static BOOL ttxTextEditing, ttxKeyboardShown;
 
 static void TTXFindUIKitRange(void) {
 	Dl_info info;
@@ -1301,9 +1304,30 @@ static void TTXFindUIKitRange(void) {
 - (CGRect)bounds {
 	CGRect r = %orig;
 	if (ttxScreenBypass || ttxCarScreen.width < 1 || self != [UIScreen mainScreen]) return r;
-	uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-	if (caller >= ttxUIKitStart && caller < ttxUIKitEnd) return r;
+	if (ttxTextEditing || ttxKeyboardShown) {
+		uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+		if (caller >= ttxUIKitStart && caller < ttxUIKitEnd) return r;
+	}
 	return CGRectMake(0, 0, ttxCarScreen.width, ttxCarScreen.height);
+}
+%end
+
+// Ban phim duoc tinh kich thuoc ngay khi o nhap focus (truoc thong bao WillShow) nen bat tu day
+%hook UITextField
+- (BOOL)becomeFirstResponder {
+	ttxTextEditing = YES;
+	BOOL ok = %orig;
+	if (!ok) ttxTextEditing = ttxKeyboardShown;
+	return ok;
+}
+%end
+
+%hook UITextView
+- (BOOL)becomeFirstResponder {
+	ttxTextEditing = YES;
+	BOOL ok = %orig;
+	if (!ok) ttxTextEditing = ttxKeyboardShown;
+	return ok;
 }
 %end
 
@@ -1381,6 +1405,16 @@ static void TTXStartCarTimer(void) {
 
 static void TTXScheduleCarFit(id player) {
 	dispatch_async(dispatch_get_main_queue(), ^{
+		TTXCarTick();
+	});
+}
+
+static void TTXScheduleCarRelayout(void) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+			if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+			for (UIWindow *w in ((UIWindowScene *)scene).windows) TTXRelayout(w, 0);
+		}
 		TTXCarTick();
 	});
 }
@@ -1764,7 +1798,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.47 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.48 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1814,6 +1848,16 @@ static void TTXLogDiagnostics(void) {
 	[nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 		ttxAppActive = YES;
 		TTXScheduleCarFit(ttxCurrentPlayer);
+	}];
+
+	[nc addObserverForName:UIKeyboardWillShowNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+		ttxKeyboardShown = YES;
+	}];
+	[nc addObserverForName:UIKeyboardDidHideNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+		ttxKeyboardShown = NO;
+		ttxTextEditing = NO;
+		// Het go chu: UIKit lai thay kich thuoc xe, bo cuc lai theo khung xe
+		if (ttxCarScreen.width > 0) TTXScheduleCarRelayout();
 	}];
 
 	// Class cua TikTok nam trong binary chinh, da load khi %ctor chay
