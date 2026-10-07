@@ -7,6 +7,8 @@
 #define kPrefsDomain CFSTR("com.tiktokx")
 // Key the language choice is stored under ("vi"/"en", same as before the redesign).
 #define kLanguageKey CFSTR("language")
+// Enable switch key (Root.plist), read by the header status chip.
+#define kEnabledKey CFSTR("enabled")
 #define kTTXPrefsChanged "com.tiktokx/prefsChanged"
 
 #pragma mark - Talking to TikTok
@@ -144,6 +146,145 @@ static UIImage *TTXIcon(NSString *symbol, UIColor *color) {
 	}];
 }
 
+static BOOL TTXEnabled(void) {
+	id value = (__bridge_transfer id)CFPreferencesCopyAppValue(kEnabledKey, kPrefsDomain);
+	return value ? [value boolValue] : YES;
+}
+
+#pragma mark - Header card
+
+// Blue gradient card: app icon on the left, name + tagline in white, and an On/Off chip
+// (no version - that lives in the footer card).
+@interface TTXHeaderCard : UIView
+@property (nonatomic, strong) UIView *card, *clip, *glowLarge, *glowSmall, *chip, *dot;
+@property (nonatomic, strong) CAGradientLayer *gradient;
+@property (nonatomic, strong) UIImageView *logo;
+@property (nonatomic, strong) UILabel *nameLabel, *taglineLabel, *statusLabel;
+- (void)updateWithTagline:(NSString *)tagline status:(NSString *)status enabled:(BOOL)enabled;
+@end
+
+@implementation TTXHeaderCard
+
+- (instancetype)initWithFrame:(CGRect)frame {
+	if (!(self = [super initWithFrame:frame])) return nil;
+	self.preservesSuperviewLayoutMargins = YES;
+
+	// card carries the shadow, clip rounds the content
+	_card = [UIView new];
+	_card.layer.cornerRadius = 24;
+	_card.layer.cornerCurve = kCACornerCurveContinuous;
+	_card.layer.shadowColor = [UIColor colorWithRed:0.04 green:0.27 blue:0.88 alpha:1].CGColor;
+	_card.layer.shadowOpacity = 0.30;
+	_card.layer.shadowRadius = 14;
+	_card.layer.shadowOffset = CGSizeMake(0, 6);
+	[self addSubview:_card];
+
+	_clip = [UIView new];
+	_clip.layer.cornerRadius = 24;
+	_clip.layer.cornerCurve = kCACornerCurveContinuous;
+	_clip.clipsToBounds = YES;
+	[_card addSubview:_clip];
+
+	_gradient = [CAGradientLayer layer];
+	_gradient.colors = @[(id)[UIColor colorWithRed:0.36 green:0.71 blue:1.00 alpha:1].CGColor,
+	                     (id)[UIColor colorWithRed:0.12 green:0.42 blue:1.00 alpha:1].CGColor,
+	                     (id)[UIColor colorWithRed:0.04 green:0.27 blue:0.88 alpha:1].CGColor];
+	_gradient.locations = @[@0, @0.55, @1];
+	_gradient.startPoint = CGPointZero;
+	_gradient.endPoint = CGPointMake(1, 1);
+	[_clip.layer addSublayer:_gradient];
+
+	// Two soft circles on the right (glass highlight)
+	_glowLarge = [UIView new];
+	_glowLarge.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+	[_clip addSubview:_glowLarge];
+	_glowSmall = [UIView new];
+	_glowSmall.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+	[_clip addSubview:_glowSmall];
+
+	NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+	_logo = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"logo" inBundle:bundle compatibleWithTraitCollection:nil]];
+	_logo.layer.shadowColor = UIColor.blackColor.CGColor;
+	_logo.layer.shadowOpacity = 0.18;
+	_logo.layer.shadowRadius = 8;
+	_logo.layer.shadowOffset = CGSizeMake(0, 4);
+	[_clip addSubview:_logo];
+
+	_nameLabel = [UILabel new];
+	_nameLabel.text = @"TikTokX";
+	_nameLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+	_nameLabel.textColor = UIColor.whiteColor;
+	[_clip addSubview:_nameLabel];
+
+	_taglineLabel = [UILabel new];
+	_taglineLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+	_taglineLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+	_taglineLabel.numberOfLines = 2;
+	[_clip addSubview:_taglineLabel];
+
+	_chip = [UIView new];
+	_chip.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+	_chip.layer.cornerRadius = 11;
+	[_clip addSubview:_chip];
+
+	_dot = [UIView new];
+	_dot.layer.cornerRadius = 3.5;
+	[_chip addSubview:_dot];
+
+	_statusLabel = [UILabel new];
+	_statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+	_statusLabel.textColor = UIColor.whiteColor;
+	[_chip addSubview:_statusLabel];
+	return self;
+}
+
+- (void)updateWithTagline:(NSString *)tagline status:(NSString *)status enabled:(BOOL)enabled {
+	_taglineLabel.text = tagline;
+	_statusLabel.text = status;
+	_dot.backgroundColor = enabled ? [UIColor colorWithRed:0.45 green:0.95 blue:0.55 alpha:1]
+	                               : [UIColor colorWithRed:1.00 green:0.55 blue:0.45 alpha:1];
+	[self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+	[super layoutSubviews];
+	// Lines up with the inset-grouped rows below
+	UIEdgeInsets m = self.layoutMargins;
+	CGRect r = CGRectMake(m.left, 16, self.bounds.size.width - m.left - m.right, self.bounds.size.height - 32);
+	_card.frame = r;
+	_clip.frame = _card.bounds;
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	_gradient.frame = _clip.bounds;
+	[CATransaction commit];
+	_card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:24].CGPath;
+
+	CGFloat W = r.size.width, H = r.size.height;
+	_glowLarge.frame = CGRectMake(W - 120, -50, 170, 170);
+	_glowLarge.layer.cornerRadius = 85;
+	_glowSmall.frame = CGRectMake(W - 60, H - 70, 110, 110);
+	_glowSmall.layer.cornerRadius = 55;
+
+	const CGFloat side = 64;
+	_logo.frame = CGRectMake(20, (H - side) / 2, side, side);
+	CGFloat x = CGRectGetMaxX(_logo.frame) + 16, w = W - x - 16;
+	// Name, tagline (1-2 lines) and chip as one block, centered vertically
+	CGFloat taglineH = ceil([_taglineLabel sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)].height);
+	_nameLabel.frame = CGRectMake(x, (H - (32 + taglineH + 8 + 22)) / 2, w, 32);
+	_taglineLabel.frame = CGRectMake(x, CGRectGetMaxY(_nameLabel.frame), w, taglineH);
+
+	CGSize s = [_statusLabel sizeThatFits:CGSizeMake(w, 22)];
+	_chip.frame = CGRectMake(x, CGRectGetMaxY(_taglineLabel.frame) + 8, s.width + 30, 22);
+	_dot.frame = CGRectMake(10, 7.5, 7, 7);
+	_statusLabel.frame = CGRectMake(22, 0, s.width, 22);
+}
+
+@end
+
+@interface TTXRootListController ()
+@property (nonatomic, strong) TTXHeaderCard *headerCard;
+@end
+
 @implementation TTXRootListController
 
 #pragma mark - Specifiers
@@ -186,6 +327,8 @@ static UIImage *TTXIcon(NSString *symbol, UIColor *color) {
 	[super setPreferenceValue:value specifier:specifier];
 	TTXPublishPrefs();
 	[[UISelectionFeedbackGenerator new] selectionChanged];
+	// The header chip follows the enable switch right away (new value, not a possibly stale prefs read).
+	if ([[specifier propertyForKey:@"key"] isEqualToString:(__bridge NSString *)kEnabledKey]) [self updateHeaderStatusEnabled:[value boolValue]];
 }
 
 #pragma mark - Appearance
@@ -205,6 +348,7 @@ static UIImage *TTXIcon(NSString *symbol, UIColor *color) {
 	[super viewWillAppear:animated];
 	CFPreferencesAppSynchronize(kPrefsDomain);
 	[self reloadSpecifiers];
+	[self updateHeaderStatus];
 	self.table.backgroundColor = TTXBackgroundColor();
 	self.table.tintColor = TTXAccentColor();
 }
@@ -294,14 +438,22 @@ static UIImage *TTXIcon(NSString *symbol, UIColor *color) {
 	return label;
 }
 
-// Top card: name and description, app icon on the right. The enable switch follows as the first row.
+// Top card (gradient, see TTXHeaderCard). The enable switch follows as the first row.
 - (UIView *)headerView {
-	NSBundle *bundle = [NSBundle bundleForClass:[self class]];
-	UIImage *logo = [UIImage imageNamed:@"logo" inBundle:bundle compatibleWithTraitCollection:nil];
-	return [self cardContainerWithHeight:128 insets:UIEdgeInsetsMake(16, 0, 0, 0) image:logo side:64 imageOnRight:YES lines:@[
-		[self labelWithText:@"TikTokX" size:20 weight:UIFontWeightBold color:[UIColor labelColor]],
-		[self labelWithText:L(@"HEADER_TAGLINE") size:13 weight:UIFontWeightRegular color:[UIColor secondaryLabelColor]],
-	]];
+	if (!self.headerCard) {
+		self.headerCard = [[TTXHeaderCard alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 150)];
+		self.headerCard.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	}
+	[self updateHeaderStatus];
+	return self.headerCard;
+}
+
+- (void)updateHeaderStatus {
+	[self updateHeaderStatusEnabled:TTXEnabled()];
+}
+
+- (void)updateHeaderStatusEnabled:(BOOL)enabled {
+	[self.headerCard updateWithTagline:L(@"HEADER_TAGLINE") status:L(enabled ? @"STATUS_ON" : @"STATUS_OFF") enabled:enabled];
 }
 
 // Bottom card: author logo, app name, version and copyright.

@@ -2,6 +2,8 @@
 
 "LANGUAGE" = "Language";
 "HEADER_TAGLINE" = "Background play, auto scroll and lock screen controls for TikTok";
+"STATUS_ON" = "On";
+"STATUS_OFF" = "Off";
 "VERSION_FORMAT" = "Version: %@";
 "COPYRIGHT" = "Copyright © 2026 AnLai";
 "OK" = "OK";
