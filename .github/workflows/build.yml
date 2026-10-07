@@ -3,8 +3,12 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,18 +27,37 @@ jobs:
           git clone --depth 1 https://github.com/theos/sdks.git sdks-tmp
           mv sdks-tmp/*.sdk "$THEOS/sdks/"
           rm -rf sdks-tmp
-          ls "$THEOS/sdks"
-          ls -d "$THEOS"/sdks/*/System/Library/PrivateFrameworks/Preferences.framework || true
 
       - name: Build package
         run: |
           set -o pipefail
           if ! gmake package FINALPACKAGE=1 2>&1 | tee build.log; then
+            # Dua dong loi len annotation (xem duoc ma khong can dang nhap)
             grep -iE "error|fatal|undefined" build.log | head -20 | while IFS= read -r line; do echo "::error::$line"; done
             exit 1
           fi
+          VERSION=$(sed -n 's/^Version: *//p' control | tr -d '\r')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p out
+          cp packages/*.deb "out/TikTokX_${VERSION}_rootless.deb"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TikTokX
-          path: packages/*.deb
+          name: TikTokX_${{ env.VERSION }}_rootless
+          path: out/*.deb
+
+      # Push tag vX.Y.Z (trung Version trong control) -> tao GitHub Release kem file .deb
+      - name: Check tag matches control Version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME khong khop Version $VERSION trong control"
+            exit 1
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: TikTokX ${{ env.VERSION }}
+          files: out/*.deb
+          generate_release_notes: true
