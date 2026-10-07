@@ -129,7 +129,9 @@ static void TTXLoadPrefs(void) {
 		notify_cancel(token);
 	}
 	NSString *source;
+	BOOL enabled;
 	if (state & kTTXStateValid) {
+		enabled = (state & kTTXStateEnabled) != 0;
 		ttxBackgroundAudio = (state & kTTXStateBackground) != 0;
 		ttxAutoNext = (state & kTTXStateAutoNext) != 0;
 		ttxRemoteScroll = (state & kTTXStateRemoteScroll) != 0;
@@ -138,13 +140,16 @@ static void TTXLoadPrefs(void) {
 	} else {
 		NSUserDefaults *prefs = [[NSUserDefaults alloc] initWithSuiteName:
 			[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", kTTXSuite]];
+		enabled = TTXReadBool(kTTXEnabled, kTTXDefaultEnabled, prefs);
 		ttxBackgroundAudio = TTXReadBool(kTTXBackgroundAudio, kTTXDefaultBackgroundAudio, prefs);
 		ttxAutoNext = TTXReadBool(kTTXAutoNext, kTTXDefaultAutoNext, prefs);
 		ttxRemoteScroll = TTXReadBool(kTTXRemoteScroll, kTTXDefaultRemoteScroll, prefs);
 		ttxClearDisplay = TTXReadBool(kTTXClearDisplay, kTTXDefaultClearDisplay, prefs);
 		source = @"plist";
 	}
-	TTXLog(@"[TikTokX] prefs (%@): backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
+	// Cong tac tong tat thi coi nhu tat ca tinh nang deu tat
+	if (!enabled) ttxBackgroundAudio = ttxAutoNext = ttxRemoteScroll = ttxClearDisplay = NO;
+	TTXLog(@"[TikTokX] prefs (%@): enabled=%d backgroundAudio=%d autoNext=%d remoteScroll=%d clearDisplay=%d", source, enabled, ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay);
 }
 
 static void TTXSetupRemoteCommands(void);
@@ -162,6 +167,14 @@ static void TTXPrefsChanged(CFNotificationCenterRef center, void *observer, CFSt
 // Cap nhat tu notification tren main thread; hook pause co the chay o thread khac
 // nen khong goi UIApplication truc tiep o do
 static volatile BOOL ttxAppActive = YES;
+static CGSize ttxCarScreen; // khac 0: dang o man hinh xe, mainScreen.bounds tra ve kich thuoc nay
+
+// Chi "o nen" khi app khong active VA khong hien tren man hinh xe (tren xe app co the
+// khong active nhung van dang dung). Moi thu ep de phat nen chi ap dung luc nay; khi dang
+// dung TikTok thi de TikTok tu dung video cu (chuyen tab / mo tim kiem), tranh nhieu nguon tieng.
+static BOOL TTXInBackground(void) {
+	return !ttxAppActive && ttxCarScreen.width < 1;
+}
 
 #pragma mark - Background audio
 
@@ -202,7 +215,7 @@ static BOOL TTXBackgroundCall(id obj, SEL sel, BOOL blockable) {
 		TTXScheduleCarFit(obj);
 		if (ttxAppActive) TTXScheduleClearDisplay(obj);
 	}
-	if (ttxAppActive) return NO;
+	if (!TTXInBackground()) return NO;
 	NSString *key = [NSString stringWithFormat:@"%@ -%@", NSStringFromClass(object_getClass(obj)), NSStringFromSelector(sel)];
 	@synchronized (ttxPauseCalls) {
 		[ttxPauseCalls addObject:key];
@@ -310,13 +323,14 @@ static void TTXHookBackgroundClass(NSString *className) {
 
 %hook UIApplication
 - (UIApplicationState)applicationState {
-	if (ttxBackgroundAudio && !ttxAppActive) return UIApplicationStateActive;
+	if (ttxBackgroundAudio && TTXInBackground()) return UIApplicationStateActive;
 	return %orig;
 }
 %end
 
 // TikTok co san co che phat nen (playInBackground, shouldIgnoreDisappearPause) nhung bi tat.
 // Ep getter BOOL tra ve YES; onlyInBackground = chi khi app dang o nen.
+// playInBackground ep ca luc dang mo thi feed De xuat khong dung khi mo tim kiem.
 static NSMutableArray<NSString *> *ttxBoolHooks;
 
 static void TTXForceBool(NSString *className, NSString *selName, BOOL onlyInBackground) {
@@ -331,7 +345,7 @@ static void TTXForceBool(NSString *className, NSString *selName, BOOL onlyInBack
 
 	__block BOOL (*orig)(id, SEL) = NULL;
 	IMP repl = imp_implementationWithBlock(^BOOL(id obj) {
-		if (ttxBackgroundAudio && (!onlyInBackground || !ttxAppActive)) return YES;
+		if (ttxBackgroundAudio && (!onlyInBackground || TTXInBackground())) return YES;
 		return orig(obj, sel);
 	});
 	MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
@@ -531,6 +545,7 @@ static void TTXHookLoop(NSString *className) {
 - (void)viewWillDisappear:(BOOL)animated {
 	%orig;
 	if (ttxVisibleFeed == self) ttxVisibleFeed = nil;
+	TTXLog(@"[TikTokX] Feed an (%@): active=%d xe=%d", NSStringFromClass(object_getClass(self)), ttxAppActive, ttxCarScreen.width > 0);
 }
 %end
 
@@ -1194,7 +1209,6 @@ static NSString *ttxCarWindows = @"-";
 
 // Kich thuoc that cua man hinh iPhone (khong qua hook UIScreen ben duoi)
 static BOOL ttxScreenBypass;
-static CGSize ttxCarScreen; // khac 0: dang o man hinh xe, mainScreen.bounds tra ve kich thuoc nay
 
 static CGSize TTXRealScreenSize(void) {
 	ttxScreenBypass = YES;
@@ -1548,7 +1562,8 @@ static void TTXSetupRemoteCommands(void) {
 
 // Trang tim kiem phat nen duoc, trang chu thi khong: tim cong tac phat nen cua TikTok.
 // Getter BOOL co chu "background": ten mang nghia cam (pause/stop/disable...) -> NO,
-// mang nghia cho phep (play/support/enable/allow/can) -> YES. Chi khi bat nhac nen.
+// mang nghia cho phep (play/support/enable/allow/can) -> YES. Chi khi bat nhac nen va
+// app dang o nen: ep luc dang mo lam video cu khong dung khi chuyen trang.
 static NSMutableArray<NSString *> *ttxBgSwitches;
 // Class co ten lien quan den tu cuon (nut "Tu dong cuon" trong menu nhan giu)
 static NSMutableArray<NSString *> *ttxAutoScrollClasses;
@@ -1584,7 +1599,7 @@ static void TTXForceBackgroundGetters(Class cls) {
 
 		__block BOOL (*orig)(id, SEL) = NULL;
 		IMP repl = imp_implementationWithBlock(^BOOL(id obj) {
-			if (ttxBackgroundAudio) return value;
+			if (ttxBackgroundAudio && TTXInBackground()) return value;
 			return orig(obj, sel);
 		});
 		MSHookMessageEx(cls, sel, repl, (IMP *)&orig);
@@ -1752,7 +1767,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.51 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.52 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1842,8 +1857,8 @@ static void TTXLogDiagnostics(void) {
 
 	ttxDisplaySel = NSSelectorFromString(@"containerDidFullyDisplayWithReason:");
 	ttxBoolHooks = [NSMutableArray array];
-	TTXForceBool(@"AWENewFeedTableViewController", @"playInBackground", NO);
-	TTXForceBool(@"TTKMediaVideoPlayerController", @"playInBackground", NO);
+	TTXForceBool(@"AWENewFeedTableViewController", @"playInBackground", YES);
+	TTXForceBool(@"TTKMediaVideoPlayerController", @"playInBackground", YES);
 	TTXForceBool(@"AWENewFeedTableViewController", @"shouldIgnoreDisappearPause", YES);
 
 	ttxBgSwitches = [NSMutableArray array];

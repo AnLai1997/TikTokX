@@ -1,5 +1,4 @@
-#import <Preferences/PSViewController.h>
+#import <Preferences/PSListController.h>
 
-// Giao dien tu ve theo phong cach HarmonyOS nen khong dung bang specifier cua PSListController
-@interface TTXRootListController : PSViewController <UIScrollViewDelegate>
+@interface TTXRootListController : PSListController
 @end

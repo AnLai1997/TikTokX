@@ -4,6 +4,7 @@
 
 // Preferences
 #define kTTXSuite            @"com.tiktokx"
+#define kTTXEnabled          @"enabled"
 #define kTTXBackgroundAudio  @"backgroundAudio"
 #define kTTXAutoNext         @"autoNext"
 #define kTTXRemoteScroll     @"remoteScroll"
@@ -12,13 +13,16 @@
 
 // Bit trong state cua notification kTTXPrefsChanged (prefs bundle ghi, tweak doc)
 // Doi bit "da ghi" moi khi them cong tac de bo qua state cua ban cu
-#define kTTXStateValid       (1ULL << 10)
+#define kTTXStateValid       (1ULL << 11)
 #define kTTXStateBackground  (1ULL << 1)
 #define kTTXStateAutoNext    (1ULL << 2)
 #define kTTXStateRemoteScroll (1ULL << 3)
 #define kTTXStateClearDisplay (1ULL << 4)
+// bit5 tung dung cho "Car Screen Zoom" (da bo), khong dung lai
+#define kTTXStateEnabled     (1ULL << 6)
 
 // Gia tri mac dinh khi nguoi dung chua chinh trong Settings
+#define kTTXDefaultEnabled         YES
 #define kTTXDefaultBackgroundAudio YES
 #define kTTXDefaultAutoNext        YES
 #define kTTXDefaultRemoteScroll    YES
