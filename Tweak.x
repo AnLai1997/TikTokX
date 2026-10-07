@@ -550,14 +550,21 @@ static BOOL TTXIsFullscreenButton(UIView *view) {
 	return NO;
 }
 
-// Noi dung bai dang dang anh: vung vuot anh (scroll view) hoac anh lon. Khong che va khong
-// di vao trong.
+// Noi dung bai dang dang anh: vung vuot anh (scroll view), anh lon hoac view ve anh thang len
+// layer. Khong che.
 static BOOL TTXIsMediaContent(UIView *view, CGFloat pageArea) {
 	CGFloat area = view.bounds.size.width * view.bounds.size.height;
 	if (area < pageArea * 0.25) return NO;
-	if ([view isKindOfClass:[UIScrollView class]] || [view isKindOfClass:[UIImageView class]]) return YES;
+	return [view isKindOfClass:[UIScrollView class]] || [view isKindOfClass:[UIImageView class]] || view.layer.contents != nil;
+}
+
+// Lop chua anh cua bai dang anh (ten class co photo / image / slide): nut thich, chu thich... co
+// the nam ben trong nen khong giu ca lop ma di vao trong, chi giu anh.
+static BOOL TTXIsMediaContainer(UIView *view, CGFloat pageArea) {
+	CGFloat area = view.bounds.size.width * view.bounds.size.height;
+	if (area < pageArea * 0.25) return NO;
 	NSString *name = NSStringFromClass([view class]).lowercaseString;
-	return [name containsString:@"photo"] || [name containsString:@"image"];
+	return [name containsString:@"photo"] || [name containsString:@"image"] || [name containsString:@"slide"];
 }
 
 static void TTXKeep(UIView *view) {
@@ -576,14 +583,17 @@ static BOOL TTXContainsKeptView(UIView *view, CGFloat pageArea, int depth) {
 
 // View gan bang ca o (lop chua nut, lop nhan cham dung / thich video) thi khong che ma di vao
 // trong, de cham vao video van hoat dong; view nho hon thi che han. Nut toan man hinh va anh
-// cua bai dang: bo qua, view chua chung: di vao trong de che phan con lai.
+// cua bai dang: bo qua (anh khong phai vung vuot thi van di vao trong, nut co the nam tren anh),
+// view chua chung: di vao trong de che phan con lai.
 static void TTXClearOverlay(UIView *view, CGFloat pageArea, int depth) {
 	if (TTXIsFullscreenButton(view) || TTXIsMediaContent(view, pageArea)) {
 		TTXKeep(view);
+		if ([view isKindOfClass:[UIScrollView class]] || TTXIsFullscreenButton(view) || depth >= 8) return;
+		for (UIView *sub in view.subviews) TTXClearOverlay(sub, pageArea, depth + 1);
 		return;
 	}
 	CGFloat area = view.bounds.size.width * view.bounds.size.height;
-	BOOL big = area >= pageArea * 0.8;
+	BOOL big = area >= pageArea * 0.8 || TTXIsMediaContainer(view, pageArea);
 	if (big || TTXContainsKeptView(view, pageArea, 0)) {
 		if (!big) TTXRestoreView(view);
 		if (depth >= 8) return;
@@ -676,6 +686,18 @@ static void TTXCheckSearchBars(void) {
 	TTXRestoreSearchBars(nil);
 }
 
+// Ghi cay view cua o feed vao TikTokX.txt, moi loai o mot lan (de xem bai dang anh)
+static NSMutableSet<NSString *> *ttxClearLoggedPages;
+
+static void TTXLogClearTree(UIView *view, CGFloat pageArea, int depth, NSMutableString *out) {
+	if (depth > 10 || out.length > 20000) return;
+	CGFloat area = view.bounds.size.width * view.bounds.size.height;
+	[out appendFormat:@"\n%@%@ %.0fx%.0f %.0f%%%@%@%@", [@"" stringByPaddingToLength:depth * 2 withString:@" " startingAtIndex:0],
+		NSStringFromClass([view class]), view.bounds.size.width, view.bounds.size.height, pageArea > 0 ? area / pageArea * 100 : 0,
+		[ttxClearedViews containsObject:view] ? @" [an]" : @"", view.layer.contents ? @" [anh]" : @"", view.hidden ? @" [hidden]" : @""];
+	for (UIView *sub in view.subviews) TTXLogClearTree(sub, pageArea, depth + 1, out);
+}
+
 // Chay tren main thread
 static void TTXApplyClearDisplay(id player) {
 	if (!ttxClearDisplay || ttxClearRevealed || !player) return;
@@ -699,6 +721,15 @@ static void TTXApplyClearDisplay(id player) {
 		for (NSUInteger i = idx + 1; i < siblings.count; i++) TTXClearOverlay(siblings[i], pageArea, 0);
 	}
 	NSUInteger outer = TTXClearSearchBars(page);
+	NSString *pageClass = NSStringFromClass([page class]);
+	// Bai video va bai anh co the dung chung loai o: phan biet them bang cac view con
+	NSString *pageKey = [NSString stringWithFormat:@"%@:%@", pageClass, [[page.subviews valueForKey:@"class"] componentsJoinedByString:@","]];
+	if (![ttxClearLoggedPages containsObject:pageKey]) {
+		[ttxClearLoggedPages addObject:pageKey];
+		NSMutableString *tree = [NSMutableString string];
+		TTXLogClearTree(page, pageArea, 0, tree);
+		TTXLog(@"[TikTokX] Clear cay o %@ (player %@):%@", pageClass, NSStringFromClass([playerView class]), tree);
+	}
 	ttxClearInfo = [NSString stringWithFormat:@"%@ trong %@: +%ld, tong %lu | tim kiem: %lu | giu: %@", NSStringFromClass([playerView class]),
 		NSStringFromClass([page class]), (long)ttxClearedViews.count - (long)before, (unsigned long)ttxClearedViews.count,
 		(unsigned long)outer, ttxClearKeptClasses.count ? [ttxClearKeptClasses.array componentsJoinedByString:@", "] : @"-"];
@@ -1733,7 +1764,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.46 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.47 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1765,6 +1796,7 @@ static void TTXLogDiagnostics(void) {
 	ttxCarViews = [NSMapTable weakToStrongObjectsMapTable];
 	ttxCarLayers = [NSMapTable weakToStrongObjectsMapTable];
 	ttxClearKeptClasses = [NSMutableOrderedSet orderedSet];
+	ttxClearLoggedPages = [NSMutableSet set];
 	ttxInstalled = [NSMutableArray array];
 
 	CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, TTXPrefsChanged,

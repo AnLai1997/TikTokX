@@ -294,6 +294,7 @@ static UIImage *TTXIconForKey(NSString *key) {
 	[_content setCustomSpacing:28 afterView:_content.arrangedSubviews.lastObject];
 
 	[self addSection:@"section.playback" keys:@[@"backgroundAudio", @"autoNext"]];
+	[self addSection:@"section.display" keys:@[@"remoteScroll", @"clearDisplay"]];
 
 	UILabel *about = [UILabel new];
 	about.text = [NSString stringWithFormat:TTXText(@"about"), @TTX_VERSION];
