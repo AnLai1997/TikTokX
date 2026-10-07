@@ -7,8 +7,10 @@
 #import <dlfcn.h>
 #import <mach-o/loader.h>
 
-// Ghi log vao syslog va file Documents/TikTokX.txt trong thu muc cua TikTok (mo bang Filza:
-// Apps Manager > TikTok > Data > Documents) de nguoi dung gui lai khi khong xem duoc syslog
+// Ghi log vao syslog va file Documents/TikTokX.txt trong thu muc cua TikTok. TikTok bi sandbox
+// nen khong ghi ra ngoai duoc: bao "com.tiktokx/log" de phan chay trong SpringBoard chep file ra
+// /var/mobile/Documents/TikTokX.txt (de tim trong Filza)
+#define kTTXLogChanged "com.tiktokx/log"
 static void TTXLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static void TTXLog(NSString *format, ...) {
 	va_list args;
@@ -32,11 +34,45 @@ static void TTXLog(NSString *format, ...) {
 		NSFileHandle *file = [NSFileHandle fileHandleForWritingAtPath:path];
 		if (!file) {
 			[entry writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
-			return;
+		} else {
+			if ([file seekToEndOfFile] > 1024 * 1024) return;
+			[file writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+			[file closeFile];
 		}
-		if ([file seekToEndOfFile] > 1024 * 1024) return;
-		[file writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
-		[file closeFile];
+		// Gom nhieu dong: bao SpringBoard toi da 1 lan / giay
+		static BOOL pending;
+		if (pending) return;
+		pending = YES;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), queue, ^{
+			pending = NO;
+			notify_post(kTTXLogChanged);
+		});
+	});
+}
+
+// Chay trong SpringBoard (khong bi sandbox): chep log cua TikTok ra /var/mobile/Documents
+static void TTXCopyLogToDocuments(void) {
+	NSFileManager *fm = [NSFileManager defaultManager];
+	NSString *dest = @"/var/mobile/Documents/TikTokX.txt";
+	Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+	for (NSString *bundleID in @[@"com.zhiliaoapp.musically", @"com.ss.iphone.ugc.Ame"]) {
+		id proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, NSSelectorFromString(@"applicationProxyForIdentifier:"), bundleID);
+		if (![proxy respondsToSelector:NSSelectorFromString(@"dataContainerURL")]) continue;
+		NSURL *container = ((id (*)(id, SEL))objc_msgSend)(proxy, NSSelectorFromString(@"dataContainerURL"));
+		NSString *src = [container.path stringByAppendingPathComponent:@"Documents/TikTokX.txt"];
+		if (!src || ![fm fileExistsAtPath:src]) continue;
+		[fm createDirectoryAtPath:dest.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+		[fm removeItemAtPath:dest error:nil];
+		NSError *error;
+		if (![fm copyItemAtPath:src toPath:dest error:&error]) NSLog(@"[TikTokX] chep log loi: %@", error);
+		return;
+	}
+}
+
+static void TTXStartLogCopier(void) {
+	static int token;
+	notify_register_dispatch(kTTXLogChanged, &token, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^(int t) {
+		TTXCopyLogToDocuments();
 	});
 }
 
@@ -1798,7 +1834,7 @@ static void TTXPlayInBackground(void) {
 static NSString *TTXDiagnosticReport(void) {
 	NSDictionary *info = [NSBundle mainBundle].infoDictionary;
 	NSMutableArray *lines = [NSMutableArray array];
-	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.48 | TikTok %@ (%@) | iOS %@",
+	[lines addObject:[NSString stringWithFormat:@"TikTokX 1.0.49 | TikTok %@ (%@) | iOS %@",
 		info[@"CFBundleShortVersionString"], info[@"CFBundleVersion"], [UIDevice currentDevice].systemVersion]];
 	[lines addObject:[NSString stringWithFormat:@"Prefs: nhacNen=%d autoNext=%d remoteScroll=%d clearDisplay=%d", ttxBackgroundAudio, ttxAutoNext, ttxRemoteScroll, ttxClearDisplay]];
 	[lines addObject:[NSString stringWithFormat:@"Clear: %@ | cham: %lu, hien lai: %lu", ttxClearInfo, (unsigned long)ttxTapSeen, (unsigned long)ttxTapReveal]];
@@ -1818,6 +1854,11 @@ static void TTXLogDiagnostics(void) {
 }
 
 %ctor {
+	// Trong SpringBoard chi chep file log, khong hook gi
+	if ([[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+		TTXStartLogCopier();
+		return;
+	}
 	TTXLoadPrefs();
 	TTXLog(@"[TikTokX] loaded in %@", [NSBundle mainBundle].bundleIdentifier);
 	ttxPauseCalls = [NSCountedSet set];
