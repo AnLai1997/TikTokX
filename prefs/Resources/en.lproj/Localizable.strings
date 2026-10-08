@@ -1,0 +1,26 @@
+/* TikTokX – English */
+
+"LANGUAGE" = "Language";
+"HEADER_TAGLINE" = "Background play, auto scroll and lock screen controls for TikTok";
+"STATUS_ON" = "On";
+"STATUS_OFF" = "Off";
+"VERSION_FORMAT" = "Version: %@";
+"COPYRIGHT" = "Copyright © 2026 AnLai";
+"OK" = "OK";
+
+"GENERAL_FOOTER" = "Changes apply right away, no respring needed.";
+"ENABLE" = "Enable TikTokX";
+
+/* TWEAK SETTINGS */
+
+"SECTION_PLAYBACK" = "Playback";
+"BACKGROUND_AUDIO" = "Background Play";
+"BACKGROUND_AUDIO_FOOTER" = "Keep audio playing when you leave TikTok or lock the screen.";
+"AUTO_NEXT" = "Auto Scroll";
+"AUTO_NEXT_FOOTER" = "Move to the next video when the current one finishes.";
+
+"SECTION_DISPLAY" = "Controls & Display";
+"REMOTE_SCROLL" = "Skip → Next/Previous";
+"REMOTE_SCROLL_FOOTER" = "Replace the ±15s buttons on the lock screen and Control Center with previous/next to scroll the feed.";
+"CLEAR_DISPLAY" = "Clear Display";
+"CLEAR_DISPLAY_FOOTER" = "Hide the buttons, caption, search bar and other overlays on top of videos. Tap the video to show them for 3 seconds.";

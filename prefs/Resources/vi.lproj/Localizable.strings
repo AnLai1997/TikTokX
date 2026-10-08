@@ -1,0 +1,26 @@
+/* TikTokX – Tiếng Việt */
+
+"LANGUAGE" = "Ngôn ngữ";
+"HEADER_TAGLINE" = "Phát nền, tự cuộn và điều khiển màn hình khóa cho TikTok";
+"STATUS_ON" = "Đang bật";
+"STATUS_OFF" = "Đang tắt";
+"VERSION_FORMAT" = "Phiên bản: %@";
+"COPYRIGHT" = "Bản quyền © 2026 AnLai";
+"OK" = "OK";
+
+"GENERAL_FOOTER" = "Thay đổi có hiệu lực ngay, không cần respring.";
+"ENABLE" = "Bật TikTokX";
+
+/* TWEAK SETTINGS */
+
+"SECTION_PLAYBACK" = "Phát lại";
+"BACKGROUND_AUDIO" = "Phát nền";
+"BACKGROUND_AUDIO_FOOTER" = "Tiếp tục phát âm thanh khi rời TikTok hoặc khóa màn hình.";
+"AUTO_NEXT" = "Tự cuộn";
+"AUTO_NEXT_FOOTER" = "Tự chuyển sang video tiếp theo khi video hiện tại phát xong.";
+
+"SECTION_DISPLAY" = "Điều khiển & hiển thị";
+"REMOTE_SCROLL" = "Nút tua → Bài trước/sau";
+"REMOTE_SCROLL_FOOTER" = "Thay nút tua ±15s trên màn hình khóa và Control Center bằng nút bài trước/bài sau để cuộn feed.";
+"CLEAR_DISPLAY" = "Loại bỏ yếu tố trên màn hình";
+"CLEAR_DISPLAY_FOOTER" = "Ẩn các nút, chú thích, thanh tìm kiếm và lớp giao diện khác phủ trên video. Chạm vào video để hiện lại trong 3 giây.";

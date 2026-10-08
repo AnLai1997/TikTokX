@@ -1,46 +1,50 @@
 #import "TTXRootListController.h"
+#import <Preferences/PSSpecifier.h>
+#import <Preferences/PSTableCell.h>
+#import <UIKit/UIKit.h>
 #import <notify.h>
 
-#define kTTXSuite         CFSTR("com.tiktokx")
-#define kTTXPrefsChanged  "com.tiktokx/prefsChanged"
-#define kTTXLanguage      @"language"
+#define kPrefsDomain CFSTR("com.tiktokx")
+// Key the language choice is stored under ("vi"/"en", same as before the redesign).
+#define kLanguageKey CFSTR("language")
+// Enable switch key (Root.plist), read by the header status chip.
+#define kEnabledKey CFSTR("enabled")
+#define kTTXPrefsChanged "com.tiktokx/prefsChanged"
 
-#ifndef TTX_VERSION
-#define TTX_VERSION "?"
-#endif
+#pragma mark - Talking to TikTok
 
-// Bit trong state cua notification (TikTok bi sandbox nen khong doc duoc plist,
-// nhung doc duoc state nay). bit9 = da ghi (doi khi them cong tac), bit1 = nhac nen, bit2 = tu cuon,
-// bit3 = doi nut tua thanh bai truoc / bai sau, bit4 = an giao dien phu tren video.
-#define kTTXStateValid       (1ULL << 9)
-#define kTTXStateBackground  (1ULL << 1)
-#define kTTXStateAutoNext    (1ULL << 2)
+// TikTok is sandboxed and can't read the plist Settings writes, but it can read the state of a
+// notification. Keep these bits in sync with Headers.h.
+#define kTTXStateValid        (1ULL << 11)
+#define kTTXStateBackground   (1ULL << 1)
+#define kTTXStateAutoNext     (1ULL << 2)
 #define kTTXStateRemoteScroll (1ULL << 3)
 #define kTTXStateClearDisplay (1ULL << 4)
+#define kTTXStateEnabled      (1ULL << 6)
+
+static NSArray<NSString *> *TTXSwitchKeys(void) {
+	return @[@"enabled", @"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay"];
+}
 
 static id TTXPrefValue(CFStringRef key) {
-	CFPropertyListRef value = CFPreferencesCopyAppValue(key, kTTXSuite);
-	return value ? (__bridge_transfer id)value : nil;
+	return (__bridge_transfer id)CFPreferencesCopyAppValue(key, kPrefsDomain);
 }
 
-// "Clear Display" mac dinh tat, cac cong tac khac mac dinh bat
-static BOOL TTXDefaultFor(NSString *key) {
-	return ![key isEqualToString:@"clearDisplay"];
+// "Clear Display" is off by default, every other switch is on.
+static BOOL TTXPrefBool(NSString *key) {
+	id obj = TTXPrefValue((__bridge CFStringRef)key);
+	return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : ![key isEqualToString:@"clearDisplay"];
 }
 
-static BOOL TTXPrefBool(CFStringRef key) {
-	id obj = TTXPrefValue(key);
-	return [obj respondsToSelector:@selector(boolValue)] ? [obj boolValue] : TTXDefaultFor((__bridge NSString *)key);
-}
-
-// Ghi gia tri hien tai vao state roi bao cho TikTok doc lai
+// Write the current values into the notification state, then tell TikTok to re-read it.
 static void TTXPublishPrefs(void) {
-	CFPreferencesAppSynchronize(kTTXSuite);
+	CFPreferencesAppSynchronize(kPrefsDomain);
 	uint64_t state = kTTXStateValid;
-	if (TTXPrefBool(CFSTR("backgroundAudio"))) state |= kTTXStateBackground;
-	if (TTXPrefBool(CFSTR("autoNext"))) state |= kTTXStateAutoNext;
-	if (TTXPrefBool(CFSTR("remoteScroll"))) state |= kTTXStateRemoteScroll;
-	if (TTXPrefBool(CFSTR("clearDisplay"))) state |= kTTXStateClearDisplay;
+	if (TTXPrefBool(@"enabled")) state |= kTTXStateEnabled;
+	if (TTXPrefBool(@"backgroundAudio")) state |= kTTXStateBackground;
+	if (TTXPrefBool(@"autoNext")) state |= kTTXStateAutoNext;
+	if (TTXPrefBool(@"remoteScroll")) state |= kTTXStateRemoteScroll;
+	if (TTXPrefBool(@"clearDisplay")) state |= kTTXStateClearDisplay;
 
 	int token;
 	if (notify_register_check(kTTXPrefsChanged, &token) == NOTIFY_STATUS_OK) {
@@ -50,400 +54,459 @@ static void TTXPublishPrefs(void) {
 	notify_post(kTTXPrefsChanged);
 }
 
-// Ban truoc 1.0.31 luu cai dat o com.anlai.tiktokx: chep sang ten moi neu chua co
+// Before 1.0.31 settings lived in com.anlai.tiktokx: copy them over if the new domain lacks them.
 static void TTXMigrateOldPrefs(void) {
-	CFStringRef oldSuite = CFSTR("com.anlai.tiktokx");
-	for (NSString *key in @[@"backgroundAudio", @"autoNext", @"remoteScroll", @"clearDisplay", kTTXLanguage]) {
+	CFStringRef oldDomain = CFSTR("com.anlai.tiktokx");
+	for (NSString *key in [TTXSwitchKeys() arrayByAddingObject:(__bridge NSString *)kLanguageKey]) {
 		if (TTXPrefValue((__bridge CFStringRef)key)) continue;
-		CFPropertyListRef value = CFPreferencesCopyAppValue((__bridge CFStringRef)key, oldSuite);
+		CFPropertyListRef value = CFPreferencesCopyAppValue((__bridge CFStringRef)key, oldDomain);
 		if (!value) continue;
-		CFPreferencesSetAppValue((__bridge CFStringRef)key, value, kTTXSuite);
+		CFPreferencesSetAppValue((__bridge CFStringRef)key, value, kPrefsDomain);
 		CFRelease(value);
 	}
-	CFPreferencesAppSynchronize(kTTXSuite);
+	CFPreferencesAppSynchronize(kPrefsDomain);
 }
 
-// Ngon ngu da chon; chua chon thi mac dinh tieng Anh
+#pragma mark - Localization
+
+// The app language is picked in the nav bar, so strings come from <lang>.lproj by hand
+// instead of following the system language.
+static NSDictionary<NSString *, NSString *> *sStrings;
+
+static NSArray<NSString *> *TTXLanguages(void) {
+	return @[@"vi", @"en"];
+}
+
+static NSString *TTXLanguageName(NSString *lang) {
+	return [lang isEqualToString:@"vi"] ? @"Tiếng Việt" : @"English";
+}
+
+// No choice yet: English, as before the redesign.
 static NSString *TTXLanguage(void) {
-	NSString *lang = TTXPrefValue((__bridge CFStringRef)kTTXLanguage);
-	return [lang isKindOfClass:[NSString class]] ? lang : @"en";
+	NSString *lang = TTXPrefValue(kLanguageKey);
+	return [lang isKindOfClass:[NSString class]] && [TTXLanguages() containsObject:lang] ? lang : @"en";
 }
 
-static NSString *TTXText(NSString *key) {
-	static NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *strings;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{
-		strings = @{
-			@"en": @{
-				@"backgroundAudio": @"Background Play",
-				@"backgroundAudio.info": @"Keep audio playing when you leave TikTok or lock the screen.",
-				@"autoNext": @"Auto Scroll",
-				@"autoNext.info": @"Move to the next video when the current one finishes.",
-				@"remoteScroll": @"Skip → Next/Previous",
-				@"remoteScroll.info": @"Replace the ±15s buttons on the lock screen and Control Center with previous/next to scroll the feed.",
-				@"clearDisplay": @"Clear Display",
-				@"clearDisplay.info": @"Hide the buttons, caption and other overlays on top of videos. Tap the video to show them for 3 seconds.",
-				@"language": @"Language",
-				@"section.playback": @"Playback",
-				@"section.display": @"Controls & Display",
-				@"tagline": @"Background play, auto scroll and lock screen controls for TikTok",
-				@"about": @"Version %@ · MIT License\n© 2026 AnLai",
-			},
-			@"vi": @{
-				@"backgroundAudio": @"Phát nền",
-				@"backgroundAudio.info": @"Tiếp tục phát âm thanh khi rời TikTok hoặc khóa màn hình.",
-				@"autoNext": @"Tự cuộn",
-				@"autoNext.info": @"Tự chuyển sang video tiếp theo khi video hiện tại phát xong.",
-				@"remoteScroll": @"Nút tua → Bài trước/sau",
-				@"remoteScroll.info": @"Thay nút tua ±15s trên màn hình khóa và Control Center bằng nút bài trước/bài sau để cuộn feed.",
-				@"clearDisplay": @"Loại bỏ yếu tố trên màn hình",
-				@"clearDisplay.info": @"Ẩn các nút, chú thích và lớp giao diện khác phủ trên video. Chạm vào video để hiện lại trong 3 giây.",
-				@"language": @"Ngôn ngữ",
-				@"section.playback": @"Phát lại",
-				@"section.display": @"Điều khiển & hiển thị",
-				@"tagline": @"Phát nền, tự cuộn và điều khiển màn hình khóa cho TikTok",
-				@"about": @"Phiên bản %@ · Giấy phép MIT\n© 2026 AnLai",
-			},
-		};
-	});
-	return strings[TTXLanguage()][key] ?: strings[@"en"][key] ?: key;
+static void TTXLoadStrings(void) {
+	NSString *bundlePath = [NSBundle bundleForClass:NSClassFromString(@"TTXRootListController")].bundlePath;
+	NSString *path = [bundlePath stringByAppendingFormat:@"/%@.lproj/Localizable.strings", TTXLanguage()];
+	sStrings = [NSDictionary dictionaryWithContentsOfFile:path] ?: @{};
 }
 
-#pragma mark - Mau va icon kieu HarmonyOS
+static NSString *L(NSString *key) {
+	return sStrings[key] ?: key;
+}
 
-static UIColor *TTXDynamic(uint32_t light, uint32_t dark) {
-	UIColor *(^rgb)(uint32_t) = ^(uint32_t hex) {
-		return [UIColor colorWithRed:((hex >> 16) & 0xFF) / 255.0 green:((hex >> 8) & 0xFF) / 255.0 blue:(hex & 0xFF) / 255.0 alpha:1];
+#pragma mark - HarmonyOS theme
+
+static UIColor *TTXDynamicColor(UInt32 light, UInt32 dark) {
+	UIColor *(^rgb)(UInt32) = ^(UInt32 v) {
+		return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0 green:((v >> 8) & 0xFF) / 255.0 blue:(v & 0xFF) / 255.0 alpha:1];
 	};
 	UIColor *l = rgb(light), *d = rgb(dark);
-	return [UIColor colorWithDynamicProvider:^(UITraitCollection *t) {
-		return t.userInterfaceStyle == UIUserInterfaceStyleDark ? d : l;
+	return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+		return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? d : l;
 	}];
 }
 
-// Nen xam nhat, the trang, chu va mau nhan (xanh HarmonyOS) giong app Cai dat cua HarmonyOS
-#define kTTXBackground TTXDynamic(0xF1F3F5, 0x000000)
-#define kTTXCard       TTXDynamic(0xFFFFFF, 0x202224)
-#define kTTXPrimary    TTXDynamic(0x182431, 0xE5E5E5)
-#define kTTXSecondary  TTXDynamic(0x7A8086, 0x8C9196)
-#define kTTXDivider    TTXDynamic(0xE3E5E8, 0x323436)
-#define kTTXAccent     TTXDynamic(0x0A59F7, 0x317AF7)
+static UIColor *TTXAccentColor(void)     { return TTXDynamicColor(0x0A59F7, 0x317AF7); }
+static UIColor *TTXBackgroundColor(void) { return TTXDynamicColor(0xF1F3F5, 0x000000); }
+static UIColor *TTXCardColor(void)       { return TTXDynamicColor(0xFFFFFF, 0x202224); }
 
-// O vuong bo goc mau, SF Symbol trang o giua
+static UIColor *TTXColorFromHex(NSString *hex) {
+	unsigned int v = 0;
+	[[NSScanner scannerWithString:[hex stringByReplacingOccurrencesOfString:@"#" withString:@""]] scanHexInt:&v];
+	return [UIColor colorWithRed:((v >> 16) & 0xFF) / 255.0 green:((v >> 8) & 0xFF) / 255.0 blue:(v & 0xFF) / 255.0 alpha:1];
+}
+
+// Row icon: a white SF Symbol on a rounded, softly lit color tile.
 static UIImage *TTXIcon(NSString *symbol, UIColor *color) {
-	CGRect rect = CGRectMake(0, 0, 32, 32);
-	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:rect.size];
+	UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+	UIImage *glyph = [[UIImage systemImageNamed:symbol withConfiguration:config] imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+	if (!glyph) return nil;
+
+	const CGFloat side = 29;
+	UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side)];
 	return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+		CGRect rect = CGRectMake(0, 0, side, side);
+		UIBezierPath *tile = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:8.5];
 		[color setFill];
-		[[UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:9] fill];
-		UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
-		UIImage *glyph = [[UIImage systemImageNamed:symbol withConfiguration:config] imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
-		CGSize size = glyph.size;
-		[glyph drawInRect:CGRectMake((rect.size.width - size.width) / 2, (rect.size.height - size.height) / 2, size.width, size.height)];
+		[tile fill];
+
+		[tile addClip];
+		CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+		NSArray *colors = @[(id)[UIColor colorWithWhite:1 alpha:0.22].CGColor, (id)[UIColor colorWithWhite:1 alpha:0].CGColor];
+		CGGradientRef gradient = CGGradientCreateWithColors(space, (__bridge CFArrayRef)colors, NULL);
+		CGContextDrawLinearGradient(ctx.CGContext, gradient, CGPointZero, CGPointMake(0, side), 0);
+		CGGradientRelease(gradient);
+		CGColorSpaceRelease(space);
+
+		CGSize s = glyph.size;
+		[glyph drawInRect:CGRectMake((side - s.width) / 2, (side - s.height) / 2, s.width, s.height)];
 	}];
 }
 
-static UIImage *TTXIconForKey(NSString *key) {
-	NSDictionary<NSString *, NSArray *> *icons = @{
-		@"backgroundAudio": @[@"headphones", TTXDynamic(0xF7365D, 0xF7365D)],
-		@"autoNext": @[@"arrow.down", TTXDynamic(0x0A59F7, 0x317AF7)],
-		@"remoteScroll": @[@"forward.end.fill", TTXDynamic(0x7B4FF5, 0x8A63F7)],
-		@"clearDisplay": @[@"eye.slash.fill", TTXDynamic(0xFF7500, 0xFF8A26)],
-	};
-	return TTXIcon(icons[key][0], icons[key][1]);
+static BOOL TTXEnabled(void) {
+	id value = (__bridge_transfer id)CFPreferencesCopyAppValue(kEnabledKey, kPrefsDomain);
+	return value ? [value boolValue] : YES;
 }
 
-#pragma mark - Dong cong tac
+#pragma mark - Header card
 
-// Mot dong trong the: icon, ten, mo ta va cong tac; cham ca dong cung bat/tat
-@interface TTXSwitchRow : UIControl
-@property (nonatomic, copy) NSString *key;
-@property (nonatomic, strong) UISwitch *toggle;
+// Blue gradient card: app icon on the left, name + tagline in white, and an On/Off chip
+// (no version - that lives in the footer card).
+@interface TTXHeaderCard : UIView
+@property (nonatomic, strong) UIView *card, *clip, *glowLarge, *glowSmall, *chip, *dot;
+@property (nonatomic, strong) CAGradientLayer *gradient;
+@property (nonatomic, strong) UIImageView *logo;
+@property (nonatomic, strong) UILabel *nameLabel, *taglineLabel, *statusLabel;
+- (void)updateWithTagline:(NSString *)tagline status:(NSString *)status enabled:(BOOL)enabled;
 @end
 
-@implementation TTXSwitchRow
+@implementation TTXHeaderCard
 
-- (instancetype)initWithKey:(NSString *)key {
-	if ((self = [super initWithFrame:CGRectZero])) {
-		_key = key;
+- (instancetype)initWithFrame:(CGRect)frame {
+	if (!(self = [super initWithFrame:frame])) return nil;
+	self.preservesSuperviewLayoutMargins = YES;
 
-		UIImageView *icon = [[UIImageView alloc] initWithImage:TTXIconForKey(key)];
-		[icon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+	// card carries the shadow, clip rounds the content
+	_card = [UIView new];
+	_card.layer.cornerRadius = 24;
+	_card.layer.cornerCurve = kCACornerCurveContinuous;
+	_card.layer.shadowColor = [UIColor colorWithRed:0.04 green:0.27 blue:0.88 alpha:1].CGColor;
+	_card.layer.shadowOpacity = 0.30;
+	_card.layer.shadowRadius = 14;
+	_card.layer.shadowOffset = CGSizeMake(0, 6);
+	[self addSubview:_card];
 
-		UILabel *title = [UILabel new];
-		title.text = TTXText(key);
-		title.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-		title.textColor = kTTXPrimary;
-		title.numberOfLines = 0;
+	_clip = [UIView new];
+	_clip.layer.cornerRadius = 24;
+	_clip.layer.cornerCurve = kCACornerCurveContinuous;
+	_clip.clipsToBounds = YES;
+	[_card addSubview:_clip];
 
-		UILabel *info = [UILabel new];
-		info.text = TTXText([key stringByAppendingString:@".info"]);
-		info.font = [UIFont systemFontOfSize:13];
-		info.textColor = kTTXSecondary;
-		info.numberOfLines = 0;
+	_gradient = [CAGradientLayer layer];
+	_gradient.colors = @[(id)[UIColor colorWithRed:0.36 green:0.71 blue:1.00 alpha:1].CGColor,
+	                     (id)[UIColor colorWithRed:0.12 green:0.42 blue:1.00 alpha:1].CGColor,
+	                     (id)[UIColor colorWithRed:0.04 green:0.27 blue:0.88 alpha:1].CGColor];
+	_gradient.locations = @[@0, @0.55, @1];
+	_gradient.startPoint = CGPointZero;
+	_gradient.endPoint = CGPointMake(1, 1);
+	[_clip.layer addSublayer:_gradient];
 
-		UIStackView *texts = [[UIStackView alloc] initWithArrangedSubviews:@[title, info]];
-		texts.axis = UILayoutConstraintAxisVertical;
-		texts.spacing = 2;
+	// Two soft circles on the right (glass highlight)
+	_glowLarge = [UIView new];
+	_glowLarge.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+	[_clip addSubview:_glowLarge];
+	_glowSmall = [UIView new];
+	_glowSmall.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+	[_clip addSubview:_glowSmall];
 
-		_toggle = [UISwitch new];
-		_toggle.onTintColor = kTTXAccent;
-		_toggle.on = TTXPrefBool((__bridge CFStringRef)key);
-		[_toggle setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-		[_toggle setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-		[_toggle addTarget:self action:@selector(toggleChanged) forControlEvents:UIControlEventValueChanged];
+	NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+	_logo = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"logo" inBundle:bundle compatibleWithTraitCollection:nil]];
+	_logo.layer.shadowColor = UIColor.blackColor.CGColor;
+	_logo.layer.shadowOpacity = 0.18;
+	_logo.layer.shadowRadius = 8;
+	_logo.layer.shadowOffset = CGSizeMake(0, 4);
+	[_clip addSubview:_logo];
 
-		UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, texts, _toggle]];
-		row.alignment = UIStackViewAlignmentCenter;
-		row.spacing = 12;
-		row.translatesAutoresizingMaskIntoConstraints = NO;
-		[self addSubview:row];
-		[NSLayoutConstraint activateConstraints:@[
-			[row.topAnchor constraintEqualToAnchor:self.topAnchor constant:14],
-			[row.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-14],
-			[row.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
-			[row.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-		]];
+	_nameLabel = [UILabel new];
+	_nameLabel.text = @"TikTokX";
+	_nameLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightBold];
+	_nameLabel.textColor = UIColor.whiteColor;
+	[_clip addSubview:_nameLabel];
 
-		[self addTarget:self action:@selector(rowTapped) forControlEvents:UIControlEventTouchUpInside];
-		self.accessibilityLabel = title.text;
-		self.accessibilityHint = info.text;
+	_taglineLabel = [UILabel new];
+	_taglineLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+	_taglineLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+	_taglineLabel.numberOfLines = 2;
+	[_clip addSubview:_taglineLabel];
+
+	_chip = [UIView new];
+	_chip.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+	_chip.layer.cornerRadius = 11;
+	[_clip addSubview:_chip];
+
+	_dot = [UIView new];
+	_dot.layer.cornerRadius = 3.5;
+	[_chip addSubview:_dot];
+
+	_statusLabel = [UILabel new];
+	_statusLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+	_statusLabel.textColor = UIColor.whiteColor;
+	[_chip addSubview:_statusLabel];
+	return self;
+}
+
+- (void)updateWithTagline:(NSString *)tagline status:(NSString *)status enabled:(BOOL)enabled {
+	_taglineLabel.text = tagline;
+	_statusLabel.text = status;
+	_dot.backgroundColor = enabled ? [UIColor colorWithRed:0.45 green:0.95 blue:0.55 alpha:1]
+	                               : [UIColor colorWithRed:1.00 green:0.55 blue:0.45 alpha:1];
+	[self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+	[super layoutSubviews];
+	// Lines up with the inset-grouped rows below
+	UIEdgeInsets m = self.layoutMargins;
+	CGRect r = CGRectMake(m.left, 16, self.bounds.size.width - m.left - m.right, self.bounds.size.height - 32);
+	_card.frame = r;
+	_clip.frame = _card.bounds;
+	[CATransaction begin];
+	[CATransaction setDisableActions:YES];
+	_gradient.frame = _clip.bounds;
+	[CATransaction commit];
+	_card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:24].CGPath;
+
+	CGFloat W = r.size.width, H = r.size.height;
+	_glowLarge.frame = CGRectMake(W - 120, -50, 170, 170);
+	_glowLarge.layer.cornerRadius = 85;
+	_glowSmall.frame = CGRectMake(W - 60, H - 70, 110, 110);
+	_glowSmall.layer.cornerRadius = 55;
+
+	const CGFloat side = 64;
+	_logo.frame = CGRectMake(20, (H - side) / 2, side, side);
+	CGFloat x = CGRectGetMaxX(_logo.frame) + 16, w = W - x - 16;
+	// Name, tagline (1-2 lines) and chip as one block, centered vertically
+	CGFloat taglineH = ceil([_taglineLabel sizeThatFits:CGSizeMake(w, CGFLOAT_MAX)].height);
+	_nameLabel.frame = CGRectMake(x, (H - (32 + taglineH + 8 + 22)) / 2, w, 32);
+	_taglineLabel.frame = CGRectMake(x, CGRectGetMaxY(_nameLabel.frame), w, taglineH);
+
+	CGSize s = [_statusLabel sizeThatFits:CGSizeMake(w, 22)];
+	_chip.frame = CGRectMake(x, CGRectGetMaxY(_taglineLabel.frame) + 8, s.width + 30, 22);
+	_dot.frame = CGRectMake(10, 7.5, 7, 7);
+	_statusLabel.frame = CGRectMake(22, 0, s.width, 22);
+}
+
+@end
+
+@interface TTXRootListController ()
+@property (nonatomic, strong) TTXHeaderCard *headerCard;
+@end
+
+@implementation TTXRootListController
+
+#pragma mark - Specifiers
+
+- (NSArray *)specifiers {
+	if (!_specifiers) {
+		TTXLoadStrings();
+		_specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+		[self localizeSpecifiers:_specifiers];
 	}
-	return self;
+	return _specifiers;
 }
 
-// Cham vao cong tac thi de cong tac xu ly, cham cho khac trong dong thi dong nhan
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-	if (![self pointInside:point withEvent:event]) return nil;
-	CGPoint inToggle = [self convertPoint:point toView:self.toggle];
-	if ([self.toggle pointInside:inToggle withEvent:event]) return self.toggle;
-	return self;
+// Root.plist holds string keys; swap them for the chosen language and attach the row icons.
+- (void)localizeSpecifiers:(NSArray<PSSpecifier *> *)specifiers {
+	for (PSSpecifier *spec in specifiers) {
+		if (spec.name.length) spec.name = L(spec.name);
+		NSString *footer = [spec propertyForKey:@"footerText"];
+		if (footer) [spec setProperty:L(footer) forKey:@"footerText"];
+
+		// Lists filled at runtime (file names etc.) set "dynamicTitles" so they are left alone.
+		if (spec.titleDictionary.count && ![[spec propertyForKey:@"dynamicTitles"] boolValue]) {
+			NSMutableDictionary *titles = [NSMutableDictionary dictionary];
+			[spec.titleDictionary enumerateKeysAndObjectsUsingBlock:^(id value, NSString *title, BOOL *stop) {
+				titles[value] = L(title);
+			}];
+			spec.titleDictionary = titles;
+		}
+
+		NSString *symbol = [spec propertyForKey:@"symbol"];
+		if (symbol) {
+			UIImage *icon = TTXIcon(symbol, TTXColorFromHex([spec propertyForKey:@"symbolColor"] ?: @"#0A59F7"));
+			if (icon) [spec setProperty:icon forKey:@"iconImage"];
+		}
+	}
 }
 
-- (void)setHighlighted:(BOOL)highlighted {
-	[super setHighlighted:highlighted];
-	[UIView animateWithDuration:0.15 animations:^{
-		self.backgroundColor = highlighted ? [kTTXPrimary colorWithAlphaComponent:0.05] : UIColor.clearColor;
-	}];
-}
-
-- (void)rowTapped {
-	[self.toggle setOn:!self.toggle.on animated:YES];
-	[self toggleChanged];
-}
-
-- (void)toggleChanged {
-	CFPreferencesSetAppValue((__bridge CFStringRef)self.key, (__bridge CFPropertyListRef)@(self.toggle.on), kTTXSuite);
+// Every switch also goes into the notification state, which is what TikTok actually reads.
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+	[super setPreferenceValue:value specifier:specifier];
 	TTXPublishPrefs();
 	[[UISelectionFeedbackGenerator new] selectionChanged];
+	// The header chip follows the enable switch right away (new value, not a possibly stale prefs read).
+	if ([[specifier propertyForKey:@"key"] isEqualToString:(__bridge NSString *)kEnabledKey]) [self updateHeaderStatusEnabled:[value boolValue]];
 }
 
-@end
-
-#pragma mark - Man hinh chinh
-
-@implementation TTXRootListController {
-	UIScrollView *_scroll;
-	UIStackView *_content;
-	UILabel *_largeTitle;
-}
+#pragma mark - Appearance
 
 - (void)viewDidLoad {
 	[super viewDidLoad];
 	TTXMigrateOldPrefs();
-	// State mat sau khi reboot: mo Settings la ghi lai
+	// The state is lost on reboot: opening Settings writes it again.
 	TTXPublishPrefs();
-
-	self.view.backgroundColor = kTTXBackground;
-	_scroll = [UIScrollView new];
-	_scroll.alwaysBounceVertical = YES;
-	_scroll.delegate = self;
-	_scroll.translatesAutoresizingMaskIntoConstraints = NO;
-	[self.view addSubview:_scroll];
-
-	_content = [UIStackView new];
-	_content.axis = UILayoutConstraintAxisVertical;
-	_content.translatesAutoresizingMaskIntoConstraints = NO;
-	[_scroll addSubview:_content];
-
-	[NSLayoutConstraint activateConstraints:@[
-		[_scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-		[_scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-		[_scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-		[_scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-		[_content.topAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.topAnchor constant:4],
-		[_content.bottomAnchor constraintEqualToAnchor:_scroll.contentLayoutGuide.bottomAnchor constant:-24],
-		[_content.leadingAnchor constraintEqualToAnchor:_scroll.frameLayoutGuide.leadingAnchor constant:16],
-		[_content.trailingAnchor constraintEqualToAnchor:_scroll.frameLayoutGuide.trailingAnchor constant:-16],
-	]];
-
-	[self rebuild];
+	// Scoped to this controller so the rest of Settings keeps its own look.
+	[UISwitch appearanceWhenContainedInInstancesOfClasses:@[[self class]]].onTintColor = TTXAccentColor();
+	[UISlider appearanceWhenContainedInInstancesOfClasses:@[[self class]]].minimumTrackTintColor = TTXAccentColor();
+	[self applyLanguage];
 }
 
-- (void)viewDidLayoutSubviews {
-	[super viewDidLayoutSubviews];
-	[self updateNavigationTitle];
+- (void)viewWillAppear:(BOOL)animated {
+	[super viewWillAppear:animated];
+	CFPreferencesAppSynchronize(kPrefsDomain);
+	[self reloadSpecifiers];
+	[self updateHeaderStatus];
+	self.table.backgroundColor = TTXBackgroundColor();
+	self.table.tintColor = TTXAccentColor();
 }
 
-// Dung lai toan bo noi dung theo ngon ngu hien tai
-- (void)rebuild {
-	for (UIView *view in _content.arrangedSubviews) [view removeFromSuperview];
-
-	[_content addArrangedSubview:[self makeHeader]];
-	[_content setCustomSpacing:28 afterView:_content.arrangedSubviews.lastObject];
-
-	[self addSection:@"section.playback" keys:@[@"backgroundAudio", @"autoNext"]];
-	[self addSection:@"section.display" keys:@[@"remoteScroll", @"clearDisplay"]];
-
-	UILabel *about = [UILabel new];
-	about.text = [NSString stringWithFormat:TTXText(@"about"), @TTX_VERSION];
-	about.font = [UIFont systemFontOfSize:12];
-	about.textColor = kTTXSecondary;
-	about.textAlignment = NSTextAlignmentCenter;
-	about.numberOfLines = 0;
-	[_content addArrangedSubview:about];
-
-	self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:[self languageButton]];
+- (void)applyLanguage {
+	TTXLoadStrings();
+	self.title = @"TikTokX";
+	self.table.tableHeaderView = [self headerView];
+	self.table.tableFooterView = [self footerView];
+	self.navigationItem.rightBarButtonItem = [self languageButton];
 }
 
-// Tieu de lon can trai kem dong gioi thieu, icon tweak ben phai
-- (UIView *)makeHeader {
-	_largeTitle = [UILabel new];
-	_largeTitle.text = @"TikTokX";
-	_largeTitle.font = [UIFont systemFontOfSize:30 weight:UIFontWeightBold];
-	_largeTitle.textColor = kTTXPrimary;
-
-	UILabel *tagline = [UILabel new];
-	tagline.text = TTXText(@"tagline");
-	tagline.font = [UIFont systemFontOfSize:14];
-	tagline.textColor = kTTXSecondary;
-	tagline.numberOfLines = 0;
-
-	UIStackView *texts = [[UIStackView alloc] initWithArrangedSubviews:@[_largeTitle, tagline]];
-	texts.axis = UILayoutConstraintAxisVertical;
-	texts.spacing = 4;
-
-	UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"icon" inBundle:[NSBundle bundleForClass:self.class] compatibleWithTraitCollection:nil]];
-	icon.contentMode = UIViewContentModeScaleAspectFill;
-	icon.layer.cornerRadius = 14;
-	icon.layer.cornerCurve = kCACornerCurveContinuous;
-	icon.clipsToBounds = YES;
-	[icon.widthAnchor constraintEqualToConstant:56].active = YES;
-	[icon.heightAnchor constraintEqualToConstant:56].active = YES;
-
-	UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[texts, icon]];
-	header.alignment = UIStackViewAlignmentCenter;
-	header.spacing = 16;
-	header.layoutMarginsRelativeArrangement = YES;
-	header.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(0, 8, 0, 4);
-	return header;
-}
-
-// Tieu de nho mau xam phia tren, cac dong nam chung mot the bo goc lon, ngan cach bang duong manh
-- (void)addSection:(NSString *)titleKey keys:(NSArray<NSString *> *)keys {
-	UILabel *title = [UILabel new];
-	title.text = TTXText(titleKey);
-	title.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-	title.textColor = kTTXSecondary;
-	UIStackView *titleWrap = [[UIStackView alloc] initWithArrangedSubviews:@[title]];
-	titleWrap.layoutMarginsRelativeArrangement = YES;
-	titleWrap.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(0, 12, 0, 12);
-	[_content addArrangedSubview:titleWrap];
-	[_content setCustomSpacing:8 afterView:titleWrap];
-
-	UIStackView *rows = [UIStackView new];
-	rows.axis = UILayoutConstraintAxisVertical;
-	for (NSString *key in keys) {
-		if (rows.arrangedSubviews.count) {
-			// Duong ngan cach bat dau tu cot chu, khong cham icon
-			UIView *line = [UIView new];
-			line.backgroundColor = kTTXDivider;
-			line.translatesAutoresizingMaskIntoConstraints = NO;
-			UIView *divider = [UIView new];
-			[divider addSubview:line];
-			[NSLayoutConstraint activateConstraints:@[
-				[divider.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
-				[line.topAnchor constraintEqualToAnchor:divider.topAnchor],
-				[line.bottomAnchor constraintEqualToAnchor:divider.bottomAnchor],
-				[line.leadingAnchor constraintEqualToAnchor:divider.leadingAnchor constant:56],
-				[line.trailingAnchor constraintEqualToAnchor:divider.trailingAnchor constant:-12],
-			]];
-			[rows addArrangedSubview:divider];
-		}
-		[rows addArrangedSubview:[[TTXSwitchRow alloc] initWithKey:key]];
-	}
-
-	UIView *card = [UIView new];
-	card.backgroundColor = kTTXCard;
-	card.layer.cornerRadius = 20;
-	card.layer.cornerCurve = kCACornerCurveContinuous;
-	card.clipsToBounds = YES;
-	rows.translatesAutoresizingMaskIntoConstraints = NO;
-	[card addSubview:rows];
-	[NSLayoutConstraint activateConstraints:@[
-		[rows.topAnchor constraintEqualToAnchor:card.topAnchor constant:4],
-		[rows.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-4],
-		[rows.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
-		[rows.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
-	]];
-	[_content addArrangedSubview:card];
-	[_content setCustomSpacing:24 afterView:card];
-}
-
-// Nut vien thuoc o goc phai: icon qua dia cau + ma ngon ngu, cham de hien menu chon
-- (UIButton *)languageButton {
+- (UIBarButtonItem *)languageButton {
 	NSString *current = TTXLanguage();
-	NSArray *codes = @[@"en", @"vi"];
-	NSArray *names = @[@"English", @"Tiếng Việt"];
 	NSMutableArray *actions = [NSMutableArray array];
 	__weak typeof(self) weakSelf = self;
-	for (NSUInteger i = 0; i < codes.count; i++) {
-		NSString *code = codes[i];
-		UIAction *action = [UIAction actionWithTitle:names[i] image:nil identifier:nil handler:^(UIAction *a) {
-			[weakSelf setLanguage:code];
+	for (NSString *lang in TTXLanguages()) {
+		UIAction *action = [UIAction actionWithTitle:TTXLanguageName(lang) image:nil identifier:nil handler:^(UIAction *a) {
+			[weakSelf setLanguage:lang];
 		}];
-		action.state = [code isEqualToString:current] ? UIMenuElementStateOn : UIMenuElementStateOff;
+		action.state = [lang isEqualToString:current] ? UIMenuElementStateOn : UIMenuElementStateOff;
 		[actions addObject:action];
 	}
-
-	UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-	config.baseBackgroundColor = [kTTXPrimary colorWithAlphaComponent:0.06];
-	config.baseForegroundColor = kTTXPrimary;
-	config.image = [UIImage systemImageNamed:@"globe" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightMedium]];
-	config.imagePadding = 5;
-	config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-	config.contentInsets = NSDirectionalEdgeInsetsMake(6, 11, 6, 12);
-	config.attributedTitle = [[NSAttributedString alloc] initWithString:current.uppercaseString
-		attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]}];
-
-	UIButton *button = [UIButton buttonWithConfiguration:config primaryAction:nil];
-	button.menu = [UIMenu menuWithTitle:TTXText(@"language") children:actions];
-	button.showsMenuAsPrimaryAction = YES;
-	button.accessibilityLabel = TTXText(@"language");
-	return button;
+	UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"globe"] style:UIBarButtonItemStylePlain target:nil action:nil];
+	item.menu = [UIMenu menuWithTitle:L(@"LANGUAGE") children:actions];
+	item.tintColor = TTXAccentColor();
+	return item;
 }
 
-- (void)setLanguage:(NSString *)code {
-	if ([code isEqualToString:TTXLanguage()]) return;
-	CFPreferencesSetAppValue((__bridge CFStringRef)kTTXLanguage, (__bridge CFStringRef)code, kTTXSuite);
-	CFPreferencesAppSynchronize(kTTXSuite);
-	[UIView transitionWithView:_content duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-		[self rebuild];
-	} completion:nil];
+- (void)setLanguage:(NSString *)lang {
+	CFPreferencesSetAppValue(kLanguageKey, (__bridge CFStringRef)lang, kPrefsDomain);
+	CFPreferencesAppSynchronize(kPrefsDomain);
+	[self applyLanguage];
+	_specifiers = nil;
+	[self reloadSpecifiers];
 }
 
-// Nhu HarmonyOS: tieu de chi hien tren thanh dieu huong khi tieu de lon da cuon khuat
-- (void)updateNavigationTitle {
-	if (!_largeTitle) return;
-	CGRect frame = [_largeTitle convertRect:_largeTitle.bounds toView:_scroll];
-	BOOL largeVisible = CGRectIsEmpty(frame) || _scroll.contentOffset.y + _scroll.adjustedContentInset.top < CGRectGetMaxY(frame);
-	NSString *title = largeVisible ? @"" : @"TikTokX";
-	if (![self.navigationItem.title isEqualToString:title]) self.navigationItem.title = title;
+// A full-width table header/footer holding one rounded card: an image beside a column of text lines.
+// The card follows the table's layout margins so it lines up with the inset-grouped rows.
+- (UIView *)cardContainerWithHeight:(CGFloat)height insets:(UIEdgeInsets)insets image:(UIImage *)image side:(CGFloat)side imageOnRight:(BOOL)imageOnRight lines:(NSArray<UILabel *> *)lines {
+	UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, height)];
+	container.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	container.preservesSuperviewLayoutMargins = YES;
+
+	UIView *card = [UIView new];
+	card.backgroundColor = TTXCardColor();
+	card.layer.cornerRadius = 20;
+	card.layer.cornerCurve = kCACornerCurveContinuous;
+	card.translatesAutoresizingMaskIntoConstraints = NO;
+	[container addSubview:card];
+
+	UIImageView *imageView = [[UIImageView alloc] initWithImage:image];
+	imageView.translatesAutoresizingMaskIntoConstraints = NO;
+
+	UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:lines];
+	text.axis = UILayoutConstraintAxisVertical;
+	text.spacing = 3;
+
+	UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:imageOnRight ? @[text, imageView] : @[imageView, text]];
+	row.alignment = UIStackViewAlignmentCenter;
+	row.spacing = 14;
+	row.translatesAutoresizingMaskIntoConstraints = NO;
+	[card addSubview:row];
+
+	UILayoutGuide *margins = container.layoutMarginsGuide;
+	[NSLayoutConstraint activateConstraints:@[
+		[card.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+		[card.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+		[card.topAnchor constraintEqualToAnchor:container.topAnchor constant:insets.top],
+		[card.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-insets.bottom],
+		[imageView.widthAnchor constraintEqualToConstant:side],
+		[imageView.heightAnchor constraintEqualToConstant:side],
+		[row.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
+		imageOnRight ? [row.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16]
+		             : [row.trailingAnchor constraintLessThanOrEqualToAnchor:card.trailingAnchor constant:-16],
+		[row.centerYAnchor constraintEqualToAnchor:card.centerYAnchor],
+	]];
+	return container;
 }
 
-- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-	[self updateNavigationTitle];
+- (UILabel *)labelWithText:(NSString *)text size:(CGFloat)size weight:(UIFontWeight)weight color:(UIColor *)color {
+	UILabel *label = [UILabel new];
+	label.text = text;
+	label.font = [UIFont systemFontOfSize:size weight:weight];
+	label.textColor = color;
+	label.numberOfLines = 0;
+	return label;
 }
+
+// Top card (gradient, see TTXHeaderCard). The enable switch follows as the first row.
+- (UIView *)headerView {
+	if (!self.headerCard) {
+		self.headerCard = [[TTXHeaderCard alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 150)];
+		self.headerCard.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+	}
+	[self updateHeaderStatus];
+	return self.headerCard;
+}
+
+- (void)updateHeaderStatus {
+	[self updateHeaderStatusEnabled:TTXEnabled()];
+}
+
+- (void)updateHeaderStatusEnabled:(BOOL)enabled {
+	[self.headerCard updateWithTagline:L(@"HEADER_TAGLINE") status:L(enabled ? @"STATUS_ON" : @"STATUS_OFF") enabled:enabled];
+}
+
+// Bottom card: author logo, app name, version and copyright.
+- (UIView *)footerView {
+	NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+	UIImage *avatar = [UIImage imageNamed:@"avatar" inBundle:bundle compatibleWithTraitCollection:nil];
+	return [self cardContainerWithHeight:136 insets:UIEdgeInsetsMake(8, 0, 32, 0) image:avatar side:56 imageOnRight:NO lines:@[
+		[self labelWithText:@"TikTokX" size:16 weight:UIFontWeightSemibold color:[UIColor labelColor]],
+		[self labelWithText:[NSString stringWithFormat:L(@"VERSION_FORMAT"), @TWEAK_VERSION] size:13 weight:UIFontWeightRegular color:[UIColor secondaryLabelColor]],
+		[self labelWithText:L(@"COPYRIGHT") size:13 weight:UIFontWeightRegular color:[UIColor secondaryLabelColor]],
+	]];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+	UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
+	cell.backgroundColor = TTXCardColor();
+	cell.textLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+
+	// Action rows read as regular navigation rows; only destructive ones stay red.
+	PSSpecifier *spec = [cell isKindOfClass:[PSTableCell class]] ? ((PSTableCell *)cell).specifier : nil;
+	if (spec.cellType == PSButtonCell) {
+		BOOL destructive = [[spec propertyForKey:@"isDestructive"] boolValue];
+		cell.textLabel.textColor = destructive ? [UIColor systemRedColor] : [UIColor labelColor];
+		cell.accessoryType = destructive ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
+	}
+	return cell;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+	if ([PSListController instancesRespondToSelector:_cmd]) [super tableView:tableView willDisplayHeaderView:view forSection:section];
+	if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+	UILabel *label = ((UITableViewHeaderFooterView *)view).textLabel;
+	label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+	label.textColor = [UIColor secondaryLabelColor];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+	if ([PSListController instancesRespondToSelector:_cmd]) [super tableView:tableView willDisplayFooterView:view forSection:section];
+	if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+	UILabel *label = ((UITableViewHeaderFooterView *)view).textLabel;
+	label.font = [UIFont systemFontOfSize:12];
+	label.textColor = [UIColor secondaryLabelColor];
+}
+
+#pragma mark - Helpers for actions
+
+- (void)showMessage:(NSString *)message {
+	UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"TikTokX" message:message preferredStyle:UIAlertControllerStyleAlert];
+	[alert addAction:[UIAlertAction actionWithTitle:L(@"OK") style:UIAlertActionStyleDefault handler:nil]];
+	[self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Actions
+// TikTokX has no button rows yet; PSButtonCell actions would go here.
 
 @end
-
